@@ -267,59 +267,11 @@ impl<const N: usize> Display for BytesRepresentation<N> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::MangekyouError;
+    use serde::{Deserialize, Serialize};
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::groups::bls12381::{G1Element, G1ElementAsBytes, G1_ELEMENT_BYTE_LENGTH};
-//     use crate::groups::GroupElement;
-//     use schemars::schema_for;
-
-//     #[derive(Serialize, Deserialize, JsonSchema)]
-//     struct Dummy<T> {
-//         key: T,
-//     }
-
-//     #[test]
-//     fn test_serializations() {
-//         let g1 = G1Element::generator();
-//         let b64 = G1ElementAsBytes::from(&g1);
-//         let d1 = Dummy::<G1ElementAsBytes> { key: b64 };
-//         // Test that we are not adding extra fields.
-//         assert_eq!(
-//             serde_json::to_string(&d1).unwrap(),
-//             r#"{"key":"l/HTpzGX15QmlWOMT6msD8NojE+XdLkFoU46PxcbrFhsVeg/+Xoa7/s68ArbIsa7"}"#
-//         );
-//         // Test that we don't add extra bytes on top of the actual serialized data.
-//         let ser = bincode::serialize(&d1).unwrap();
-//         assert_eq!(G1_ELEMENT_BYTE_LENGTH, ser.len());
-//         // Check we can go back correctly.
-//         let d2: Dummy<G1ElementAsBytes> = bincode::deserialize(&ser).unwrap();
-//         let g2 = G1Element::try_from(&d2.key).unwrap();
-//         assert_eq!(g1, g2);
-//         // Check the resulting schema.
-//         let schema = schema_for!(Dummy::<G1ElementAsBytes>);
-//         assert_eq!(
-//             r##"{
-//   "$schema": "http://json-schema.org/draft-07/schema#",
-//   "title": "Dummy_for_Base64",
-//   "type": "object",
-//   "required": [
-//     "key"
-//   ],
-//   "properties": {
-//     "key": {
-//       "$ref": "#/definitions/Base64"
-//     }
-//   },
-//   "definitions": {
-//     "Base64": {
-//       "description": "Base64 encoding",
-//       "type": "string"
-//     }
-//   }
-// }"##,
-//             serde_json::to_string_pretty(&schema).unwrap()
-//         );
-//     }
-// }
+    // ... existing code ...
+}

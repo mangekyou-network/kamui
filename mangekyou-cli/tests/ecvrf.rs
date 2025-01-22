@@ -3,6 +3,9 @@
 
 use assert_cmd::Command;
 use regex::Regex;
+use std::fs::File;
+use std::io::Write;
+use tempfile::tempdir;
 
 #[test]
 fn integration_test_ecvrf_keygen() {
@@ -17,47 +20,41 @@ fn integration_test_ecvrf_keygen() {
 
 #[test]
 fn integration_test_ecvrf_prove() {
-    let input = "01020304";
-    let secret_key = "b057530c45b7b0f4b96f9b21b011072b2a513f45dd9537ad796acf571055550f";
-    let result = Command::cargo_bin("ecvrf-cli")
-        .unwrap()
-        .arg("prove")
-        .arg("--input")
-        .arg(input)
-        .arg("--secret-key")
-        .arg(secret_key)
-        .ok();
-    assert!(result.is_ok());
+    let temp_dir = tempdir().unwrap();
+    let secret_key_path = temp_dir.path().join("secret_key.txt");
+    let mut secret_key_file = File::create(&secret_key_path).unwrap();
+    secret_key_file.write_all(b"58ff3113e38280ef17b3e276c44d10ff05517309d0fe145cf66a09aefcc7bd03").unwrap();
 
-    let expected = "Proof:  2640d12c11a372c726348d60ec74ac80320960ba541fb3e66af0a21590c0a75bf5ccf408d5070c5de77f87c733512f575b4a03511d0031dc2e78ab1582fbbef919b52732c8cb1f44b27ad1d1293dec0f\nOutput: 84588b918a6c9f5b8b74e56a305bb1c2d44e73f68457e991a1dc8defd51672c36b07a2fa95b9f1e701d0152b35d373ab8c48468f0de4bb5abfe84504319fd00c\n";
-    let output = String::from_utf8(result.unwrap().stdout).unwrap();
-    assert_eq!(expected, output);
+    let output = Command::cargo_bin("ecvrf-cli")
+        .unwrap()
+        .args(&["prove", "-i", "01020304", "-s", "58ff3113e38280ef17b3e276c44d10ff05517309d0fe145cf66a09aefcc7bd03"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let output_str = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        output_str,
+        "Proof:  1a290c2cc2c76df369f97651c9afd01a59e5cb0e096d40827a573720f6cc681ed349949df21365e12e3aad5970dbbb2c236044f2efa73e354961dab98651bec1c5cc0a33f4a0b23af79a5ad84c304d02\nOutput: d11788f3a9cc69309d803db495623433db261150497944d1189f289058479c1abcef7a3b2c41effd658da8bb02fe96c449317f9f2e2e6b3910c925c568deeb28\n"
+    );
 }
 
 #[test]
 fn integration_test_ecvrf_verify() {
-    let input = "01020304";
-    let public_key = "42250302396453b168c42d5b91e162b848b1b4f90f37818cb4798944095de557";
-    let proof = "2640d12c11a372c726348d60ec74ac80320960ba541fb3e66af0a21590c0a75bf5ccf408d5070c5de77f87c733512f575b4a03511d0031dc2e78ab1582fbbef919b52732c8cb1f44b27ad1d1293dec0f";
-    let output = "84588b918a6c9f5b8b74e56a305bb1c2d44e73f68457e991a1dc8defd51672c36b07a2fa95b9f1e701d0152b35d373ab8c48468f0de4bb5abfe84504319fd00c";
-
     let result = Command::cargo_bin("ecvrf-cli")
         .unwrap()
-        .arg("verify")
-        .arg("--output")
-        .arg(output)
-        .arg("--proof")
-        .arg(proof)
-        .arg("--input")
-        .arg(input)
-        .arg("--public-key")
-        .arg(public_key)
-        .ok();
-    assert!(result.is_ok());
+        .args(&[
+            "verify",
+            "--input", "01020304",
+            "--public-key", "aac27ae1424168bf72eb98f1a7f701fec16e0880e179905cefbd155ec446b326",
+            "--proof", "1a290c2cc2c76df369f97651c9afd01a59e5cb0e096d40827a573720f6cc681ed349949df21365e12e3aad5970dbbb2c236044f2efa73e354961dab98651bec1c5cc0a33f4a0b23af79a5ad84c304d02",
+            "--output", "d11788f3a9cc69309d803db495623433db261150497944d1189f289058479c1abcef7a3b2c41effd658da8bb02fe96c449317f9f2e2e6b3910c925c568deeb28"
+        ])
+        .output()
+        .unwrap();
 
-    let expected = "Proof verified correctly!\n";
-    let output = String::from_utf8(result.unwrap().stdout).unwrap();
-    assert_eq!(expected, output);
+    assert!(result.status.success());
+    assert_eq!(String::from_utf8(result.stdout).unwrap(), "Proof verified correctly!\n");
 }
 
 #[test]
