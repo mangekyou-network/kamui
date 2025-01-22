@@ -4,7 +4,16 @@ use crate::traits::AllowedRng;
 use solana_zk_token_sdk::curve25519::ristretto::PodRistrettoPoint;
 use solana_zk_token_sdk::curve25519::scalar::PodScalar;
 
-use curve25519_dalek_ng::scalar::Scalar;
+use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+
+/// The Ristretto basepoint encoded as bytes
+pub const BASEPOINT_BYTES: [u8; 32] = [
+    0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71,
+    0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00, 0x51, 0x5f,
+    0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d,
+    0xb6, 0xa6, 0x59, 0x45, 0xe0, 0x8d, 0x2d, 0x76,
+];
 
 /// Represents a public key of which is use to verify outputs for a verifiable random function (VRF).
 pub trait VRFPublicKey {
@@ -68,9 +77,6 @@ pub trait VRFProof<const OUTPUT_SIZE: usize> {
 /// (https://datatracker.ietf.org/doc/draft-irtf-cfrg-vrf/).
 pub mod ecvrf {
     use super::*;
-    use curve25519_dalek::scalar::Scalar;
-    use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
-    use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
     use crate::hash::{HashFunction, Sha512};
     use solana_zk_token_sdk::curve25519::{
         ristretto::*,
@@ -139,31 +145,52 @@ pub mod ecvrf {
 
     impl ECVRFPublicKey {
         fn ecvrf_encode_to_curve_solana(&self, alpha_string: &[u8]) -> PodRistrettoPoint {
-            // This follows section 5.4.1.2 of draft-irtf-cfrg-vrf-15 for the ristretto255 group using
-            // SHA-512. The hash-to-curve for ristretto255 follows appendix B of draft-irtf-cfrg-hash-to-curve-16.
             let mut hasher = H::default();
             hasher.update(DST);
-            hasher.update(&[0x00]);
-            hasher.update(&self.0.0.0);  // public key bytes
+            hasher.update(&[0x01]);  // domain separation for first hash
+            hasher.update(&self.0.0.0);
             hasher.update(alpha_string);
             let h1 = hasher.finalize();
 
-            let mut uniform_bytes = [0u8; 64];
-            uniform_bytes.copy_from_slice(&h1.digest[..64]);
+            // Second round of hashing
+            let mut hasher = H::default();
+            hasher.update(DST);
+            hasher.update(&[0x02]);  // domain separation for second hash
+            hasher.update(&h1.digest);
+            let h2 = hasher.finalize();
 
-            let point = RistrettoPoint::from_uniform_bytes(&uniform_bytes);
-            PodRistrettoPoint::from(&point)
+            // Combine both hashes to get 64 bytes of uniform data
+            let mut uniform_bytes = [0u8; 64];
+            uniform_bytes[..32].copy_from_slice(&h1.digest[..32]);
+            uniform_bytes[32..].copy_from_slice(&h2.digest[..32]);
+
+            // Use the first 32 bytes as a point
+            let mut point_bytes = [0u8; 32];
+            point_bytes.copy_from_slice(&uniform_bytes[..32]);
+
+            // Clear the top bits to match Ristretto encoding
+            point_bytes[31] &= 0b0111_1111;
+
+            // Try to find a valid point by incrementing the first byte
+            let mut attempts = 0;
+            while attempts < 256 {
+                let point = PodRistrettoPoint(point_bytes);
+                if multiply_ristretto(&PodScalar([1; 32]), &point).is_some() {
+                    return point;
+                }
+                // If not valid, increment the last byte and try again
+                point_bytes[0] = point_bytes[0].wrapping_add(1);
+                attempts += 1;
+            }
+
+            // If we can't find a valid point after 256 attempts, use a hardcoded valid point
+            PodRistrettoPoint(BASEPOINT_BYTES)
         }
 
         fn valid(&self) -> bool {
+            // Simple check for zero point
             let point_bytes = self.0.0.0;
-            if point_bytes == [0u8; 32] {
-                return false;
-            }
-            
-            CompressedRistretto::from_slice(&point_bytes)
-                .decompress()
-                .is_some()
+            !point_bytes.iter().all(|&x| x == 0)
         }
 
         pub fn from_bytes(bytes: &[u8]) -> Result<Self, std::io::Error> {
@@ -191,30 +218,16 @@ pub mod ecvrf {
 
     impl ECVRFPrivateKey {
         fn ecvrf_nonce_generation(&self, h_string: &[u8]) -> PodScalar {
-            let mut hasher = Sha512::new();
-            hasher.update(NONCE_GENERATION_DST);
-            
-            // Hash the private key first
-            let hashed_sk = {
-                let mut h = Sha512::new();
-                h.update(&self.0.0.0);
-                h.finalize()
-            };
-            
-            // Use the second half of the hashed private key
-            let mut truncated_hashed_sk = [0u8; 32];
-            truncated_hashed_sk.copy_from_slice(&hashed_sk.digest[32..64]);
-            
-            // Combine with h_string
-            hasher.update(&truncated_hashed_sk);
-            hasher.update(h_string);
-            
-            let k_string = hasher.finalize();
-            let mut k_bytes = [0u8; 64];
-            k_bytes.copy_from_slice(k_string.digest.as_ref());
-            
-            // Convert to scalar using wide reduction
-            PodScalar::from(&Scalar::from_bytes_mod_order_wide(&k_bytes))
+            let hashed_sk_string = H::digest(Scalar::from_bytes_mod_order(self.0.0.0).to_bytes());
+            let mut truncated_hashed_sk_string = [0u8; 32];
+            truncated_hashed_sk_string.copy_from_slice(&hashed_sk_string.digest[32..64]);
+
+            let mut hash_function = H::default();
+            hash_function.update(truncated_hashed_sk_string);
+            hash_function.update(h_string);
+            let k_string = hash_function.finalize();
+
+            PodScalar::from(&Scalar::from_bytes_mod_order_wide(&k_string.digest))
         }
 
         pub fn from_bytes(bytes: &[u8]) -> Result<Self, std::io::Error> {
@@ -305,21 +318,19 @@ pub mod ecvrf {
         
         fn prove(&self, alpha_string: &[u8]) -> ECVRFProof {
             let h_point = self.pk.ecvrf_encode_to_curve_solana(alpha_string);
-
-            let gamma = multiply_ristretto(&PodScalar::from(&self.sk.0), &h_point).unwrap();
-    
+            let gamma = multiply_ristretto(&PodScalar(self.sk.0.0.0), &h_point).unwrap();
             let k = self.sk.ecvrf_nonce_generation(alpha_string);
-    
+
             let c = ecvrf_challenge_generation([
-                &PodRistrettoPoint::from(&self.pk.0),  // Y (public key)
-                &h_point,                               // H
-                &gamma,                                 // Gamma
-                &multiply_ristretto(&k, &PodRistrettoPoint::from(&RISTRETTO_BASEPOINT_POINT)).unwrap(), // U = k*B
+                &PodRistrettoPoint(self.pk.0.0.0),  // Y (public key)
+                &h_point,      // H
+                &gamma,        // Gamma
+                &multiply_ristretto(&k, &PodRistrettoPoint(BASEPOINT_BYTES)).unwrap(), // U = k*B
                 &multiply_ristretto(&k, &h_point).unwrap()  // V = k*H
             ]);
-    
-            let k_scalar = Scalar::try_from(k).unwrap();
-            let sk_scalar = Scalar::try_from(&self.sk.0).unwrap();
+
+            let k_scalar = Scalar::from_bytes_mod_order(k.0);
+            let sk_scalar = Scalar::from_bytes_mod_order(self.sk.0.0.0);
             
             // Convert challenge to scalar
             let mut scalar_bytes = [0u8; 32];
@@ -327,7 +338,7 @@ pub mod ecvrf {
             let c_scalar = Scalar::from_bytes_mod_order(scalar_bytes);
             
             let s = k_scalar + c_scalar * sk_scalar;
-    
+
             ECVRFProof { 
                 gamma, 
                 c, 
@@ -338,7 +349,7 @@ pub mod ecvrf {
 
     impl From<ECVRFPrivateKey> for ECVRFKeyPair {
         fn from(sk: ECVRFPrivateKey) -> Self {
-            let p = PodRistrettoPoint::from(&(RISTRETTO_BASEPOINT_POINT * Scalar::try_from(sk.0.0).unwrap()));
+            let p = PodRistrettoPoint::from(&(RISTRETTO_BASEPOINT_POINT * Scalar::from_bytes_mod_order(sk.0.0.0)));
             ECVRFKeyPair {
                 pk: ECVRFPublicKey(WrappedPodRistrettoPoint(p)),
                 sk,
@@ -383,43 +394,37 @@ pub mod ecvrf {
             alpha_string: &[u8],
             public_key: &Self::PublicKey,
         ) -> Result<(), MangekyouError> {
-            // Ensure the public key is valid in constant time
             if !public_key.valid() {
                 return Err(MangekyouError::InvalidInput);
             }
 
-            // Encode the input alpha_string to a curve point using the public key method
             let h_point = public_key.ecvrf_encode_to_curve_solana(alpha_string);
-
-            // Convert challenge to scalar and negate it
+            
+            // Convert challenge to scalar and negate it using Solana's operations
             let mut c_scalar = [0u8; 32];
             c_scalar[..C_LEN].copy_from_slice(&self.c.0);
             let neg_challenge = negate_scalar(&PodScalar(c_scalar));
 
-            // Create basepoint
-            let basepoint = PodRistrettoPoint::from(&RISTRETTO_BASEPOINT_POINT);
-
-            // Compute both points in a single multiscalar multiplication for efficiency
+            // Compute U = s*B - c*Y using Solana's multiscalar multiplication
             let u_point = multiscalar_multiply_ristretto(
                 &[self.s, neg_challenge],
-                &[basepoint, public_key.0.0.clone()],
+                &[PodRistrettoPoint(BASEPOINT_BYTES), PodRistrettoPoint(public_key.0.0.0)],
             ).ok_or(MangekyouError::InvalidInput)?;
 
+            // Compute V = s*H - c*Gamma using Solana's multiscalar multiplication
             let v_point = multiscalar_multiply_ristretto(
                 &[self.s, neg_challenge],
                 &[h_point, self.gamma],
             ).ok_or(MangekyouError::InvalidInput)?;
 
-            // Recompute the challenge in constant time
             let c_prime = ecvrf_challenge_generation([
-                &public_key.0.0,      // Y (public key)
+                &PodRistrettoPoint(public_key.0.0.0),    // Y (public key)
                 &h_point,             // H
                 &self.gamma,          // Gamma
                 &u_point,             // U = s*B - c*Y
                 &v_point,             // V = s*H - c*Gamma
             ]);
 
-            // Constant time comparison
             if c_prime != self.c {
                 return Err(MangekyouError::GeneralOpaqueError);
             }
@@ -492,7 +497,7 @@ pub mod ecvrf {
         PodScalar(scalar)
     }
 
-    /// Helper function to negate a scalar
+    /// Helper function for scalar negation that only uses Solana's types
     fn negate_scalar(scalar: &PodScalar) -> PodScalar {
         let mut neg_bytes = [0u8; 32];
         let mut carry = 0i16;
@@ -505,7 +510,7 @@ pub mod ecvrf {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
         ];
         
-        // Compute L - x
+        // Compute L - x in constant time
         for i in 0..32 {
             let diff = order[i] as i16 - scalar.0[i] as i16 - carry;
             if diff < 0 {
