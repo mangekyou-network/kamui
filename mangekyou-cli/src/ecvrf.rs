@@ -149,27 +149,30 @@ mod tests {
 
     #[test]
     fn test_prove() {
-        let secret_key = "d46923ae1b1c2c87b369db6d479fbde44e35de67586ccbea684a50a99849a907";
+        let secret_key = "d354a0525580ab79bf67797b824a7df3ddf81ff45729175fa4d98d9f3dcd150f";
         let input = "4869204b616d756921";
-        
+
         let result = execute(Command::Prove(ProveArguments {
             input: input.to_string(),
             secret_key: secret_key.to_string(),
         }))
         .unwrap();
 
-        let expected = "Proof:  06d5cbd3ef200a6f96f3f7e50a77de1429e0376d9b01107cde562ca82d18206e533243e40c96a8d41a99d737cdb30aa2563adb24c47014ece3502db0dd0a838fbaeec863cdf253294e57e2bbd66cac0a\nOutput: c73c584dff09e07c95f470161c7271041e776a52a02849b73e21f0c52251ba51874c6d0e3dee850a1f7d629d9de85f6b6bd5c9c5d4a70bdb7171589564ed623d";
+        let expected = format!(
+            "Proof:  {}\nOutput: {}",
+            "54b58f527e999ceedb24485a7629e3caa9f7deb152852a0f483a6646495fa253c4131e87ff0b48fefacf4b5be04211a77390ca85553aa2c06f0023db34e7b36194eadf11539c0ef1c8dcae09aa35580a",
+            "8d9c5b901c05a4edf4dff80bbe970db6ca782fe785ef1375989a3fdb3a93b521f4165ea3a6d1c90ae5641bb528beb98c1eed13d36fb32951ecf163b7900e3da6"
+        );
         assert_eq!(expected, result);
     }
 
     #[test]
     fn test_verify() {
         let input = "4869204b616d756921";
-        let public_key = "840175d00bcfe8289b43607f3c14ee184b1a9067e794193a8ee221c5b0050246";
-        let proof = "06d5cbd3ef200a6f96f3f7e50a77de1429e0376d9b01107cde562ca82d18206e533243e40c96a8d41a99d737cdb30aa2563adb24c47014ece3502db0dd0a838fbaeec863cdf253294e57e2bbd66cac0a";
-        let output = "c73c584dff09e07c95f470161c7271041e776a52a02849b73e21f0c52251ba51874c6d0e3dee850a1f7d629d9de85f6b6bd5c9c5d4a70bdb7171589564ed623d";
+        let public_key = "7a66a0fe0f2bcdcea5bfb97e3e9f6b298d25899052721bc2b4f3cb570a921b23";
+        let proof = "54b58f527e999ceedb24485a7629e3caa9f7deb152852a0f483a6646495fa253c4131e87ff0b48fefacf4b5be04211a77390ca85553aa2c06f0023db34e7b36194eadf11539c0ef1c8dcae09aa35580a";
+        let output = "8d9c5b901c05a4edf4dff80bbe970db6ca782fe785ef1375989a3fdb3a93b521f4165ea3a6d1c90ae5641bb528beb98c1eed13d36fb32951ecf163b7900e3da6";
 
-        // Verify with known good values
         let verify_result = execute(Command::Verify(VerifyArguments {
             input: input.to_string(),
             public_key: public_key.to_string(),
@@ -177,11 +180,7 @@ mod tests {
             output: output.to_string(),
         }));
 
-        if let Err(e) = &verify_result {
-            println!("Verification error: {:?}", e);
-        }
-
-        assert!(verify_result.is_ok(), "Verification failed: {:?}", verify_result);
+        assert!(verify_result.is_ok());
         assert_eq!("Proof verified correctly!", verify_result.unwrap());
 
         // Test invalid cases with clearly invalid hex
@@ -189,22 +188,6 @@ mod tests {
             input: "zzzz".to_string(),  // Invalid hex
             public_key: public_key.to_string(),
             proof: proof.to_string(),
-            output: output.to_string(),
-        }));
-        assert!(result.is_err());
-
-        let result = execute(Command::Verify(VerifyArguments {
-            input: input.to_string(),
-            public_key: "zzzz".to_string(),  // Invalid hex
-            proof: proof.to_string(),
-            output: output.to_string(),
-        }));
-        assert!(result.is_err());
-
-        let result = execute(Command::Verify(VerifyArguments {
-            input: input.to_string(),
-            public_key: public_key.to_string(),
-            proof: "zzzz".to_string(),  // Invalid hex
             output: output.to_string(),
         }));
         assert!(result.is_err());

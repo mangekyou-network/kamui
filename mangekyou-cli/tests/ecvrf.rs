@@ -20,41 +20,50 @@ fn integration_test_ecvrf_keygen() {
 
 #[test]
 fn integration_test_ecvrf_prove() {
-    let temp_dir = tempdir().unwrap();
-    let secret_key_path = temp_dir.path().join("secret_key.txt");
-    let mut secret_key_file = File::create(&secret_key_path).unwrap();
-    secret_key_file.write_all(b"d46923ae1b1c2c87b369db6d479fbde44e35de67586ccbea684a50a99849a907").unwrap();
+    let secret_key = "d354a0525580ab79bf67797b824a7df3ddf81ff45729175fa4d98d9f3dcd150f";
+    let input = "4869204b616d756921";
 
-    let output = Command::cargo_bin("ecvrf-cli")
-        .unwrap()
-        .args(&["prove", "-i", "4869204b616d756921", "-s", "d46923ae1b1c2c87b369db6d479fbde44e35de67586ccbea684a50a99849a907"])
+    let expected = format!(
+        "Proof:  {}\nOutput: {}\n",
+        "54b58f527e999ceedb24485a7629e3caa9f7deb152852a0f483a6646495fa253c4131e87ff0b48fefacf4b5be04211a77390ca85553aa2c06f0023db34e7b36194eadf11539c0ef1c8dcae09aa35580a",
+        "8d9c5b901c05a4edf4dff80bbe970db6ca782fe785ef1375989a3fdb3a93b521f4165ea3a6d1c90ae5641bb528beb98c1eed13d36fb32951ecf163b7900e3da6"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ecvrf-cli"))
+        .arg("prove")
+        .arg("--input")
+        .arg(input)
+        .arg("--secret-key")
+        .arg(secret_key)
         .output()
         .unwrap();
 
     assert!(output.status.success());
-    let output_str = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(
-        output_str,
-        "Proof:  06d5cbd3ef200a6f96f3f7e50a77de1429e0376d9b01107cde562ca82d18206e533243e40c96a8d41a99d737cdb30aa2563adb24c47014ece3502db0dd0a838fbaeec863cdf253294e57e2bbd66cac0a\nOutput: c73c584dff09e07c95f470161c7271041e776a52a02849b73e21f0c52251ba51874c6d0e3dee850a1f7d629d9de85f6b6bd5c9c5d4a70bdb7171589564ed623d\n"
-    );
+    assert_eq!(expected, String::from_utf8_lossy(&output.stdout));
 }
 
 #[test]
 fn integration_test_ecvrf_verify() {
-    let result = Command::cargo_bin("ecvrf-cli")
-        .unwrap()
-        .args(&[
-            "verify",
-            "--input", "4869204b616d756921",
-            "--public-key", "840175d00bcfe8289b43607f3c14ee184b1a9067e794193a8ee221c5b0050246",
-            "--proof", "06d5cbd3ef200a6f96f3f7e50a77de1429e0376d9b01107cde562ca82d18206e533243e40c96a8d41a99d737cdb30aa2563adb24c47014ece3502db0dd0a838fbaeec863cdf253294e57e2bbd66cac0a",
-            "--output", "c73c584dff09e07c95f470161c7271041e776a52a02849b73e21f0c52251ba51874c6d0e3dee850a1f7d629d9de85f6b6bd5c9c5d4a70bdb7171589564ed623d"
-        ])
+    let input = "4869204b616d756921";
+    let public_key = "7a66a0fe0f2bcdcea5bfb97e3e9f6b298d25899052721bc2b4f3cb570a921b23";
+    let proof = "54b58f527e999ceedb24485a7629e3caa9f7deb152852a0f483a6646495fa253c4131e87ff0b48fefacf4b5be04211a77390ca85553aa2c06f0023db34e7b36194eadf11539c0ef1c8dcae09aa35580a";
+    let output = "8d9c5b901c05a4edf4dff80bbe970db6ca782fe785ef1375989a3fdb3a93b521f4165ea3a6d1c90ae5641bb528beb98c1eed13d36fb32951ecf163b7900e3da6";
+
+    let result = Command::new(env!("CARGO_BIN_EXE_ecvrf-cli"))
+        .arg("verify")
+        .arg("--input")
+        .arg(input)
+        .arg("--public-key")
+        .arg(public_key)
+        .arg("--proof")
+        .arg(proof)
+        .arg("--output")
+        .arg(output)
         .output()
         .unwrap();
 
     assert!(result.status.success());
-    assert_eq!(String::from_utf8(result.stdout).unwrap(), "Proof verified correctly!\n");
+    assert_eq!("Proof verified correctly!\n", String::from_utf8_lossy(&result.stdout));
 }
 
 #[test]

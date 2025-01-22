@@ -145,45 +145,63 @@ pub mod ecvrf {
 
     impl ECVRFPublicKey {
         fn ecvrf_encode_to_curve_solana(&self, alpha_string: &[u8]) -> PodRistrettoPoint {
+            // Constants for expand_message_xmd
+            const B_IN_BYTES: usize = 64;  // SHA-512 output size
+            const DST: &[u8] = b"ECVRF_ristretto255_XMD:SHA-512_R255MAP_RO_sol_vrf";
+            const LEN_IN_BYTES: usize = 64;  // We want 64 bytes of output
+
+            // Compute b_0 = H(Z_pad || msg || len || DST || DST_len)
             let mut hasher = H::default();
-            hasher.update(DST);
-            hasher.update(&[0x01]);  // domain separation for first hash
-            hasher.update(&self.0.0.0);
+            // Z_pad is a block of zeros
+            hasher.update(&[0u8; 128]);  // SHA-512 block size is 128 bytes
             hasher.update(alpha_string);
-            let h1 = hasher.finalize();
-
-            // Second round of hashing
-            let mut hasher = H::default();
+            hasher.update(&[(LEN_IN_BYTES >> 8) as u8, LEN_IN_BYTES as u8]);
             hasher.update(DST);
-            hasher.update(&[0x02]);  // domain separation for second hash
-            hasher.update(&h1.digest);
-            let h2 = hasher.finalize();
+            hasher.update(&[DST.len() as u8]);
+            let b_0 = hasher.finalize();
 
-            // Combine both hashes to get 64 bytes of uniform data
+            // Compute b_1 = H(b_0 || 0x01 || DST || DST_len)
+            let mut hasher = H::default();
+            hasher.update(&b_0.digest);
+            hasher.update(&[1u8]);
+            hasher.update(DST);
+            hasher.update(&[DST.len() as u8]);
+            let b_1 = hasher.finalize();
+
+            // Compute b_2 = H((b_0 xor b_1) || 0x02 || DST || DST_len)
+            let mut tmp = [0u8; B_IN_BYTES];
+            for i in 0..B_IN_BYTES {
+                tmp[i] = b_0.digest[i] ^ b_1.digest[i];
+            }
+            let mut hasher = H::default();
+            hasher.update(&tmp);
+            hasher.update(&[2u8]);
+            hasher.update(DST);
+            hasher.update(&[DST.len() as u8]);
+            let b_2 = hasher.finalize();
+
+            // Combine b_1 and b_2 to get uniform bytes
             let mut uniform_bytes = [0u8; 64];
-            uniform_bytes[..32].copy_from_slice(&h1.digest[..32]);
-            uniform_bytes[32..].copy_from_slice(&h2.digest[..32]);
+            uniform_bytes[..32].copy_from_slice(&b_1.digest[..32]);
+            uniform_bytes[32..].copy_from_slice(&b_2.digest[..32]);
 
-            // Use the first 32 bytes as a point
+            // Map to curve point
             let mut point_bytes = [0u8; 32];
             point_bytes.copy_from_slice(&uniform_bytes[..32]);
+            point_bytes[31] &= 0b0111_1111;  // Clear top bit
 
-            // Clear the top bits to match Ristretto encoding
-            point_bytes[31] &= 0b0111_1111;
-
-            // Try to find a valid point by incrementing the first byte
+            // Try to find a valid point
             let mut attempts = 0;
             while attempts < 256 {
                 let point = PodRistrettoPoint(point_bytes);
                 if multiply_ristretto(&PodScalar([1; 32]), &point).is_some() {
                     return point;
                 }
-                // If not valid, increment the last byte and try again
                 point_bytes[0] = point_bytes[0].wrapping_add(1);
                 attempts += 1;
             }
 
-            // If we can't find a valid point after 256 attempts, use a hardcoded valid point
+            // Fallback to basepoint if no valid point found
             PodRistrettoPoint(BASEPOINT_BYTES)
         }
 
@@ -318,8 +336,9 @@ pub mod ecvrf {
         
         fn prove(&self, alpha_string: &[u8]) -> ECVRFProof {
             let h_point = self.pk.ecvrf_encode_to_curve_solana(alpha_string);
+            let h_string = h_point.0;
             let gamma = multiply_ristretto(&PodScalar(self.sk.0.0.0), &h_point).unwrap();
-            let k = self.sk.ecvrf_nonce_generation(alpha_string);
+            let k = self.sk.ecvrf_nonce_generation(&h_string);
 
             let c = ecvrf_challenge_generation([
                 &PodRistrettoPoint(self.pk.0.0.0),  // Y (public key)
