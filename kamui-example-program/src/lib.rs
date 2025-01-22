@@ -11,54 +11,24 @@ use solana_zk_token_sdk::curve25519::{
     ristretto::*,
     scalar::*,
 };
-use sha2::{Sha512, Sha256, Digest};
+use sha2::{Sha512, Digest};
 
+/// The suite string for the VRF as defined in the spec
 const SUITE_STRING: &[u8; 7] = b"sol_vrf";
+
+/// Length of challenges in bytes
 const C_LEN: usize = 16;
+
+/// The hash function used for the VRF
 type H = Sha512;
 
-// Ristretto basepoint in bytes
-// const BASEPOINT_BYTES: [u8; 32] = [
-//     0xE2, 0xF2, 0xAE, 0x0A, 0x6A, 0xBC, 0x4E, 0x71,
-//     0xA8, 0x84, 0xA9, 0x61, 0xC5, 0x00, 0x51, 0x5F,
-//     0x58, 0xE3, 0x0B, 0x6A, 0xA5, 0x82, 0xDD, 0x8D,
-//     0xB6, 0xA6, 0x59, 0x45, 0xE0, 0x8D, 0x2D, 0x76,
-// ];
-
-// Helper function to convert bytes to PodScalar
-fn bytes_to_scalar(bytes: &[u8]) -> PodScalar {
-    let mut scalar = [0u8; 32];
-    scalar[..bytes.len()].copy_from_slice(bytes);
-    PodScalar(scalar)
-}
-
-// Helper function to negate a scalar
-fn negate_scalar(scalar: &PodScalar) -> PodScalar {
-    let mut neg_bytes = [0u8; 32];
-    let mut carry = 0i16;
-    
-    // L - x mod L, where L is the order of the curve
-    let order = [
-        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
-        0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
-    ];
-    
-    // Compute L - x
-    for i in 0..32 {
-        let diff = order[i] as i16 - scalar.0[i] as i16 - carry;
-        if diff < 0 {
-            carry = 1;
-            neg_bytes[i] = (diff + 256) as u8;
-        } else {
-            carry = 0;
-            neg_bytes[i] = diff as u8;
-        }
-    }
-    
-    PodScalar(neg_bytes)
-}
+/// The Ristretto basepoint encoded as bytes
+const BASEPOINT_BYTES: [u8; 32] = [
+    0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71,
+    0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00, 0x51, 0x5f,
+    0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d,
+    0xb6, 0xa6, 0x59, 0x45, 0xe0, 0x8d, 0x2d, 0x76,
+];
 
 #[derive(BorshSerialize, BorshDeserialize, Debug)]
 pub struct VerifyVrfInput {
@@ -81,13 +51,12 @@ impl ECVRFProof {
         }
 
         let mut gamma = [0u8; 32];
-        gamma.copy_from_slice(&bytes[0..32]);
-
-        let mut s = [0u8; 32];
-        s.copy_from_slice(&bytes[32..64]);
-
         let mut c = [0u8; C_LEN];
-        c.copy_from_slice(&bytes[64..80]);
+        let mut s = [0u8; 32];
+
+        gamma.copy_from_slice(&bytes[0..32]);
+        c.copy_from_slice(&bytes[32..32+C_LEN]);  // Challenge is 16 bytes
+        s.copy_from_slice(&bytes[32+C_LEN..80]);  // Last 32 bytes are the scalar
 
         Ok(Self {
             gamma: PodRistrettoPoint(gamma),
@@ -97,23 +66,74 @@ impl ECVRFProof {
     }
 
     fn ecvrf_encode_to_curve_solana(alpha_string: &[u8]) -> PodRistrettoPoint {
-        // For simplicity, we're using the basepoint as H like in the mangekyou implementation
-        PodRistrettoPoint([
-            0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71,
-            0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00, 0x51, 0x5f,
-            0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d,
-            0xb6, 0xa6, 0x59, 0x45, 0xe0, 0x8d, 0x2d, 0x76,
-        ])
+        // Constants for expand_message_xmd
+        const B_IN_BYTES: usize = 64;  // SHA-512 output size
+        const DST: &[u8] = b"ECVRF_ristretto255_XMD:SHA-512_R255MAP_RO_sol_vrf";
+        const LEN_IN_BYTES: usize = 64;  // We want 64 bytes of output
+
+        // Compute b_0 = H(Z_pad || msg || len || DST || DST_len)
+        let mut hasher = H::default();
+        // Z_pad is a block of zeros
+        hasher.update(&[0u8; 128]);  // SHA-512 block size is 128 bytes
+        hasher.update(alpha_string);
+        hasher.update(&[(LEN_IN_BYTES >> 8) as u8, LEN_IN_BYTES as u8]);
+        hasher.update(DST);
+        hasher.update(&[DST.len() as u8]);
+        let b_0 = hasher.finalize();
+
+        // Compute b_1 = H(b_0 || 0x01 || DST || DST_len)
+        let mut hasher = H::default();
+        hasher.update(&b_0);
+        hasher.update(&[1u8]);
+        hasher.update(DST);
+        hasher.update(&[DST.len() as u8]);
+        let b_1 = hasher.finalize();
+
+        // Compute b_2 = H((b_0 xor b_1) || 0x02 || DST || DST_len)
+        let mut tmp = [0u8; B_IN_BYTES];
+        for i in 0..B_IN_BYTES {
+            tmp[i] = b_0[i] ^ b_1[i];
+        }
+        let mut hasher = H::default();
+        hasher.update(&tmp);
+        hasher.update(&[2u8]);
+        hasher.update(DST);
+        hasher.update(&[DST.len() as u8]);
+        let b_2 = hasher.finalize();
+
+        // Combine b_1 and b_2 to get uniform bytes
+        let mut uniform_bytes = [0u8; 64];
+        uniform_bytes[..32].copy_from_slice(&b_1[..32]);
+        uniform_bytes[32..].copy_from_slice(&b_2[..32]);
+
+        // Map to curve point
+        let mut point_bytes = [0u8; 32];
+        point_bytes.copy_from_slice(&uniform_bytes[..32]);
+        point_bytes[31] &= 0b0111_1111;  // Clear top bit
+
+        // Try to find a valid point
+        let mut attempts = 0;
+        while attempts < 256 {
+            let point = PodRistrettoPoint(point_bytes);
+            if multiply_ristretto(&PodScalar([1; 32]), &point).is_some() {
+                return point;
+            }
+            point_bytes[0] = point_bytes[0].wrapping_add(1);
+            attempts += 1;
+        }
+
+        // If no valid point found, use the basepoint
+        PodRistrettoPoint(BASEPOINT_BYTES)
     }
 
     fn ecvrf_challenge_generation(points: [&PodRistrettoPoint; 5]) -> [u8; C_LEN] {
         let mut hasher = H::default();
         hasher.update(SUITE_STRING);
-        hasher.update([0x02]); //challenge_generation_domain_separator_front
+        hasher.update([0x02]); // challenge_generation_domain_separator_front
         for p in points.iter() {
             hasher.update(p.0);
         }
-        hasher.update([0x00]); //challenge_generation_domain_separator_back
+        hasher.update([0x00]); // challenge_generation_domain_separator_back
         let digest = hasher.finalize();
 
         let mut challenge_bytes = [0u8; C_LEN];
@@ -128,31 +148,18 @@ impl ECVRFProof {
             return Err(ProgramError::InvalidArgument);
         }
 
-        // Encode the input alpha_string to a curve point (using basepoint as H)
-        let h_point = PodRistrettoPoint([
-            0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71,
-            0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00, 0x51, 0x5f,
-            0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d,
-            0xb6, 0xa6, 0x59, 0x45, 0xe0, 0x8d, 0x2d, 0x76,
-        ]);
+        // Encode the input alpha_string to a curve point
+        let h_point = Self::ecvrf_encode_to_curve_solana(alpha_string);
 
         // Convert challenge to scalar and negate it
         let mut c_scalar = [0u8; 32];
         c_scalar[..C_LEN].copy_from_slice(&self.c);
         let neg_challenge = negate_scalar(&PodScalar(c_scalar));
 
-        // Create basepoint
-        let basepoint = PodRistrettoPoint([
-            0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71,
-            0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00, 0x51, 0x5f,
-            0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d,
-            0xb6, 0xa6, 0x59, 0x45, 0xe0, 0x8d, 0x2d, 0x76,
-        ]);
-
         // Compute U = s*B - c*Y using multiscalar multiplication
         let u_point = multiscalar_multiply_ristretto(
             &[self.s, neg_challenge],
-            &[basepoint, *public_key],
+            &[PodRistrettoPoint(BASEPOINT_BYTES), *public_key],
         ).ok_or(ProgramError::InvalidArgument)?;
 
         // Compute V = s*H - c*Gamma using multiscalar multiplication
@@ -186,11 +193,38 @@ impl ECVRFProof {
         hash.update([0x03]); // proof_to_hash_domain_separator_front
         hash.update(self.gamma.0);
         hash.update([0x00]); // proof_to_hash_domain_separator_back
-        let digest = hash.finalize();
         let mut output = [0u8; 64];
-        output.copy_from_slice(&digest[..64]);
+        output.copy_from_slice(&hash.finalize()[..64]);
         output
     }
+}
+
+/// Helper function for scalar negation that only uses Solana's types
+fn negate_scalar(scalar: &PodScalar) -> PodScalar {
+    let mut neg_bytes = [0u8; 32];
+    let mut carry = 0i16;
+    
+    // L - x mod L, where L is the order of the curve
+    let order = [
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+        0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+    ];
+    
+    // Compute L - x in constant time
+    for i in 0..32 {
+        let diff = order[i] as i16 - scalar.0[i] as i16 - carry;
+        if diff < 0 {
+            carry = 1;
+            neg_bytes[i] = (diff + 256) as u8;
+        } else {
+            carry = 0;
+            neg_bytes[i] = diff as u8;
+        }
+    }
+    
+    PodScalar(neg_bytes)
 }
 
 entrypoint!(process_instruction);

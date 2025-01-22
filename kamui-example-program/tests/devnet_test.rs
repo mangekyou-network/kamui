@@ -17,9 +17,7 @@ use {
             ecvrf::ECVRFKeyPair,
             VRFKeyPair,
             VRFProof,
-            VRFPublicKey,
         },
-        serde_helpers::ToFromByteArray,
     },
     rand::thread_rng,
     hex,
@@ -62,17 +60,22 @@ async fn test_vrf_verification_devnet() {
     // Get public key bytes
     let public_key_bytes = vrf_keypair.pk.as_ref().to_vec();
     
-    // Get proof bytes in the format expected by our program (gamma || s || c)
+    // Get proof bytes and reformat to match the on-chain program's expected format (gamma || c || s)
     let proof_bytes = proof.to_bytes();
+    
+    // The proof bytes from kamui_vrf are in format gamma || c || s
+    // Our program expects the same format, so we can use them directly
     let formatted_proof = proof_bytes.clone();
 
-    println!("Gamma: {:?}", hex::encode(&proof_bytes[0..32]));
-    println!("s: {:?}", hex::encode(&proof_bytes[32..64]));
-    println!("c: {:?}", hex::encode(&proof_bytes[64..80]));
-    println!("Proof bytes: {:?}", hex::encode(&proof_bytes));
-    println!("Formatted proof: {:?}", hex::encode(&formatted_proof));
+    // Print debug information
+    println!("Proof components:");
+    println!("  Gamma: {:?}", hex::encode(&proof_bytes[0..32]));
+    println!("  Challenge: {:?}", hex::encode(&proof_bytes[32..48]));  // 16 bytes for challenge
+    println!("  Scalar: {:?}", hex::encode(&proof_bytes[48..80]));
+    println!("Complete proof: {:?}", hex::encode(&formatted_proof));
     println!("Public key: {:?}", hex::encode(&public_key_bytes));
     println!("Alpha string: {:?}", hex::encode(alpha_string));
+    println!("VRF Output: {:?}", hex::encode(&output));
 
     // Create the instruction data
     let verify_input = kamui_example_program::VerifyVrfInput {
