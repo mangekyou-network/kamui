@@ -1,5 +1,4 @@
 use {
-    borsh::BorshSerialize,
     solana_client::rpc_client::RpcClient,
     solana_program::{
         instruction::{AccountMeta, Instruction},
@@ -19,6 +18,7 @@ use {
             VRFProof,
         },
     },
+    kamui_example_program::instruction::VerifyVrfInput,
     rand::thread_rng,
     hex,
 };
@@ -78,7 +78,7 @@ async fn test_vrf_verification_devnet() {
     println!("VRF Output: {:?}", hex::encode(&output));
 
     // Create the instruction data
-    let verify_input = kamui_example_program::VerifyVrfInput {
+    let verify_input = VerifyVrfInput {
         alpha_string: alpha_string.to_vec(),
         proof_bytes: formatted_proof,
         public_key_bytes,
