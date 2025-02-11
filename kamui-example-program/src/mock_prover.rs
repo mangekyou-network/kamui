@@ -14,6 +14,8 @@ use {
         instruction::{AccountMeta, Instruction},
         pubkey::Pubkey,
         system_program,
+        system_instruction,
+        rent::Rent,
     },
     solana_program_test::BanksClient,
     solana_program_test::ProgramTest,
@@ -32,6 +34,7 @@ pub struct MockProver {
     pub banks_client: BanksClient,
     pub payer: Keypair,
     pub recent_blockhash: Hash,
+    vrf_result: Option<Pubkey>,
 }
 
 impl MockProver {
@@ -52,6 +55,7 @@ impl MockProver {
             banks_client,
             payer,
             recent_blockhash,
+            vrf_result: None,
         }
     }
 
@@ -78,6 +82,11 @@ impl MockProver {
 
         // Create VRF result account
         let vrf_result = Keypair::new();
+        self.vrf_result = Some(vrf_result.pubkey());
+
+        // Get the request account data
+        let request_account = self.banks_client.get_account(request_id).await?.unwrap();
+        let request = RandomnessRequest::try_from_slice(&request_account.data)?;
 
         // Create fulfill randomness instruction
         let fulfill_ix = Instruction {
@@ -85,8 +94,9 @@ impl MockProver {
             accounts: vec![
                 AccountMeta::new(self.payer.pubkey(), true),
                 AccountMeta::new(request_id, false),
-                AccountMeta::new(vrf_result.pubkey(), false),
+                AccountMeta::new(vrf_result.pubkey(), true),
                 AccountMeta::new_readonly(requester, false),
+                AccountMeta::new_readonly(request.subscription, false),
                 AccountMeta::new_readonly(system_program::id(), false),
             ],
             data: borsh::to_vec(&VrfCoordinatorInstruction::FulfillRandomness {
@@ -100,9 +110,13 @@ impl MockProver {
             &[fulfill_ix],
             Some(&self.payer.pubkey()),
         );
-        transaction.sign(&[&self.payer], self.recent_blockhash);
+        transaction.sign(&[&self.payer, &vrf_result], self.recent_blockhash);
         self.banks_client.process_transaction(transaction).await?;
 
         Ok(())
+    }
+
+    pub fn get_vrf_result_account(&self) -> Pubkey {
+        self.vrf_result.expect("No VRF result account available - call process_randomness_request first")
     }
 } 

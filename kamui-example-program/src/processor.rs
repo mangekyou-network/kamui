@@ -304,7 +304,7 @@ impl Processor {
         }
 
         let mut request = RandomnessRequest::try_from_slice(&request_account.data.borrow())?;
-        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow()[8..])?;
+        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow())?;
 
         // Verify the proof and generate randomness
         let randomness = [0u8; 64]; // TODO: Implement actual VRF verification
