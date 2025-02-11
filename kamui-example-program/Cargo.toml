@@ -19,6 +19,7 @@ borsh = "1.2.1"
 borsh-derive = "1.2.1"
 thiserror = "1.0"
 spl-token = { version = "4.0", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "2.0.0", features = ["no-entrypoint"] }
 sha2 = "0.10"
 base64 = "0.21"
 mangekyou = { path = "../mangekyou" }

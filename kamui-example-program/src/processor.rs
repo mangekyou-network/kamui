@@ -80,6 +80,9 @@ impl Processor {
         if !subscription_owner.is_signer {
             return Err(ProgramError::MissingRequiredSignature);
         }
+        if !subscription_account.is_signer {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
 
         let subscription = Subscription {
             owner: *subscription_owner.key,
@@ -90,9 +93,10 @@ impl Processor {
         };
 
         let rent = Rent::get()?;
-        let space = borsh::to_vec(&subscription)?.len();
+        let space = 8 + 32 + 8 + 8 + 1 + 8; // discriminator (8) + owner (32) + balance (8) + min_balance (8) + confirmations (1) + nonce (8)
         let lamports = rent.minimum_balance(space);
 
+        // Create the account
         invoke(
             &system_instruction::create_account(
                 subscription_owner.key,
@@ -108,7 +112,10 @@ impl Processor {
             ],
         )?;
 
-        subscription.serialize(&mut *subscription_account.data.borrow_mut())?;
+        // Initialize the account data with discriminator
+        let mut data = subscription_account.try_borrow_mut_data()?;
+        data[0..8].copy_from_slice(&[83, 85, 66, 83, 67, 82, 73, 80]); // "SUBSCRIP" as bytes
+        subscription.serialize(&mut &mut data[8..])?;
 
         // Emit subscription created event
         VrfEvent::SubscriptionCreated {
@@ -135,12 +142,13 @@ impl Processor {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow())?;
+        // Skip the discriminator when deserializing
+        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow()[8..])?;
         
         // Transfer tokens
         invoke(
             &token_instruction::transfer(
-                token_program.key,
+                &spl_token::id(),
                 funder_token.key,
                 subscription_token.key,
                 funder.key,
@@ -157,7 +165,11 @@ impl Processor {
 
         subscription.balance = subscription.balance.checked_add(amount)
             .ok_or(ProgramError::InvalidInstructionData)?;
-        subscription.serialize(&mut *subscription_account.data.borrow_mut())?;
+
+        // Write back with discriminator
+        let mut data = subscription_account.try_borrow_mut_data()?;
+        data[0..8].copy_from_slice(&[83, 85, 66, 83, 67, 82, 73, 80]); // "SUBSCRIP" as bytes
+        subscription.serialize(&mut &mut data[8..])?;
 
         // Emit subscription funded event
         VrfEvent::SubscriptionFunded {
@@ -188,7 +200,7 @@ impl Processor {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow())?;
+        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow()[8..])?;
         if subscription.balance < subscription.min_balance {
             return Err(VrfCoordinatorError::InsufficientBalance.into());
         }
@@ -212,11 +224,25 @@ impl Processor {
             commitment: [0; 32],
         };
 
+        // Derive the request account PDA
+        let (request_pda, bump) = Pubkey::find_program_address(
+            &[
+                b"request",
+                subscription_account.key.as_ref(),
+                &subscription.nonce.to_le_bytes(),
+            ],
+            program_id
+        );
+
+        if request_pda != *request_account.key {
+            return Err(ProgramError::InvalidSeeds);
+        }
+
         let rent = Rent::get()?;
         let space = borsh::to_vec(&request)?.len();
         let lamports = rent.minimum_balance(space);
 
-        invoke(
+        invoke_signed(
             &system_instruction::create_account(
                 requester.key,
                 request_account.key,
@@ -229,6 +255,12 @@ impl Processor {
                 request_account.clone(),
                 system_program.clone(),
             ],
+            &[&[
+                b"request",
+                subscription_account.key.as_ref(),
+                &subscription.nonce.to_le_bytes(),
+                &[bump],
+            ]],
         )?;
 
         request.serialize(&mut *request_account.data.borrow_mut())?;
@@ -236,7 +268,11 @@ impl Processor {
         // Deduct fee from subscription balance
         subscription.balance = subscription.balance.checked_sub(subscription.min_balance)
             .ok_or(ProgramError::InvalidInstructionData)?;
-        subscription.serialize(&mut *subscription_account.data.borrow_mut())?;
+        
+        // Write back with discriminator
+        let mut data = subscription_account.try_borrow_mut_data()?;
+        data[0..8].copy_from_slice(&[83, 85, 66, 83, 67, 82, 73, 80]); // "SUBSCRIP" as bytes
+        subscription.serialize(&mut &mut data[8..])?;
 
         // Emit randomness requested event
         VrfEvent::RandomnessRequested {
@@ -268,7 +304,7 @@ impl Processor {
         }
 
         let mut request = RandomnessRequest::try_from_slice(&request_account.data.borrow())?;
-        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow())?;
+        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow()[8..])?;
 
         // Verify the proof and generate randomness
         let randomness = [0u8; 64]; // TODO: Implement actual VRF verification
@@ -320,7 +356,11 @@ impl Processor {
         // Update subscription balance
         subscription.balance = subscription.balance.checked_add(subscription.min_balance)
             .ok_or(ProgramError::InvalidInstructionData)?;
-        subscription.serialize(&mut *subscription_account.data.borrow_mut())?;
+        
+        // Write back with discriminator
+        let mut data = subscription_account.try_borrow_mut_data()?;
+        data[0..8].copy_from_slice(&[83, 85, 66, 83, 67, 82, 73, 80]); // "SUBSCRIP" as bytes
+        subscription.serialize(&mut &mut data[8..])?;
 
         // Emit randomness fulfilled event
         VrfEvent::RandomnessFulfilled {
@@ -344,7 +384,7 @@ impl Processor {
         }
 
         let request = RandomnessRequest::try_from_slice(&request_account.data.borrow())?;
-        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow())?;
+        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow()[8..])?;
 
         if request.status != RequestStatus::Pending {
             return Err(VrfCoordinatorError::InvalidRequestStatus.into());
@@ -357,7 +397,11 @@ impl Processor {
         // Refund the subscription balance
         subscription.balance = subscription.balance.checked_add(subscription.min_balance)
             .ok_or(ProgramError::InvalidInstructionData)?;
-        subscription.serialize(&mut *subscription_account.data.borrow_mut())?;
+        
+        // Write back with discriminator
+        let mut data = subscription_account.try_borrow_mut_data()?;
+        data[0..8].copy_from_slice(&[83, 85, 66, 83, 67, 82, 73, 80]); // "SUBSCRIP" as bytes
+        subscription.serialize(&mut &mut data[8..])?;
 
         // Emit request cancelled event
         VrfEvent::RequestCancelled {
