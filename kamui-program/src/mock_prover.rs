@@ -1,3 +1,4 @@
+#[cfg(feature = "mock")]
 use {
     crate::{
         instruction::VrfCoordinatorInstruction,
@@ -8,7 +9,10 @@ use {
     mangekyou::kamui_vrf::{
         ecvrf::{ECVRFKeyPair, ECVRFProof},
         VRFProof,
-        VRFKeyPair
+        VRFKeyPair,
+        KamuiVrf,
+        KamuiVrfProof,
+        KamuiVrfPublicKey,
     },
     solana_program::{
         instruction::{AccountMeta, Instruction},
@@ -28,6 +32,7 @@ use {
     base64::Engine,
 };
 
+#[cfg(feature = "mock")]
 pub struct MockProver {
     pub keypair: ECVRFKeyPair,
     pub program_id: Pubkey,
@@ -37,11 +42,12 @@ pub struct MockProver {
     vrf_result: Option<Pubkey>,
 }
 
+#[cfg(feature = "mock")]
 impl MockProver {
     pub async fn new() -> Self {
         let program_id = Pubkey::new_unique();
         let program_test = ProgramTest::new(
-            "kamui_example_program",
+            "kamui_program",
             program_id,
             None,
         );

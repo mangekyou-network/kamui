@@ -1,5 +1,5 @@
 use {
-    kamui_example_program::mock_prover::MockProver,
+    kamui_program::mock_prover::MockProver,
     clap::Parser,
 };
 

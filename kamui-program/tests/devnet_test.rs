@@ -18,7 +18,7 @@ use {
             VRFProof,
         },
     },
-    kamui_example_program::instruction::VerifyVrfInput,
+    kamui_program::instruction::VerifyVrfInput,
     rand::thread_rng,
     hex,
 };
