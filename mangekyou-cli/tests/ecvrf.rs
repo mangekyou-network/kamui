@@ -3,6 +3,9 @@
 
 use assert_cmd::Command;
 use regex::Regex;
+use std::fs::File;
+use std::io::Write;
+use tempfile::tempdir;
 
 #[test]
 fn integration_test_ecvrf_keygen() {
@@ -17,47 +20,50 @@ fn integration_test_ecvrf_keygen() {
 
 #[test]
 fn integration_test_ecvrf_prove() {
-    let input = "01020304";
-    let secret_key = "b057530c45b7b0f4b96f9b21b011072b2a513f45dd9537ad796acf571055550f";
-    let result = Command::cargo_bin("ecvrf-cli")
-        .unwrap()
+    let secret_key = "d354a0525580ab79bf67797b824a7df3ddf81ff45729175fa4d98d9f3dcd150f";
+    let input = "4869204b616d756921";
+
+    let expected = format!(
+        "Proof:  {}\nOutput: {}\n",
+        "54b58f527e999ceedb24485a7629e3caa9f7deb152852a0f483a6646495fa253c4131e87ff0b48fefacf4b5be04211a77390ca85553aa2c06f0023db34e7b36194eadf11539c0ef1c8dcae09aa35580a",
+        "8d9c5b901c05a4edf4dff80bbe970db6ca782fe785ef1375989a3fdb3a93b521f4165ea3a6d1c90ae5641bb528beb98c1eed13d36fb32951ecf163b7900e3da6"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ecvrf-cli"))
         .arg("prove")
         .arg("--input")
         .arg(input)
         .arg("--secret-key")
         .arg(secret_key)
-        .ok();
-    assert!(result.is_ok());
+        .output()
+        .unwrap();
 
-    let expected = "Proof:  2640d12c11a372c726348d60ec74ac80320960ba541fb3e66af0a21590c0a75bf5ccf408d5070c5de77f87c733512f575b4a03511d0031dc2e78ab1582fbbef919b52732c8cb1f44b27ad1d1293dec0f\nOutput: 84588b918a6c9f5b8b74e56a305bb1c2d44e73f68457e991a1dc8defd51672c36b07a2fa95b9f1e701d0152b35d373ab8c48468f0de4bb5abfe84504319fd00c\n";
-    let output = String::from_utf8(result.unwrap().stdout).unwrap();
-    assert_eq!(expected, output);
+    assert!(output.status.success());
+    assert_eq!(expected, String::from_utf8_lossy(&output.stdout));
 }
 
 #[test]
 fn integration_test_ecvrf_verify() {
-    let input = "01020304";
-    let public_key = "42250302396453b168c42d5b91e162b848b1b4f90f37818cb4798944095de557";
-    let proof = "2640d12c11a372c726348d60ec74ac80320960ba541fb3e66af0a21590c0a75bf5ccf408d5070c5de77f87c733512f575b4a03511d0031dc2e78ab1582fbbef919b52732c8cb1f44b27ad1d1293dec0f";
-    let output = "84588b918a6c9f5b8b74e56a305bb1c2d44e73f68457e991a1dc8defd51672c36b07a2fa95b9f1e701d0152b35d373ab8c48468f0de4bb5abfe84504319fd00c";
+    let input = "4869204b616d756921";
+    let public_key = "7a66a0fe0f2bcdcea5bfb97e3e9f6b298d25899052721bc2b4f3cb570a921b23";
+    let proof = "54b58f527e999ceedb24485a7629e3caa9f7deb152852a0f483a6646495fa253c4131e87ff0b48fefacf4b5be04211a77390ca85553aa2c06f0023db34e7b36194eadf11539c0ef1c8dcae09aa35580a";
+    let output = "8d9c5b901c05a4edf4dff80bbe970db6ca782fe785ef1375989a3fdb3a93b521f4165ea3a6d1c90ae5641bb528beb98c1eed13d36fb32951ecf163b7900e3da6";
 
-    let result = Command::cargo_bin("ecvrf-cli")
-        .unwrap()
+    let result = Command::new(env!("CARGO_BIN_EXE_ecvrf-cli"))
         .arg("verify")
-        .arg("--output")
-        .arg(output)
-        .arg("--proof")
-        .arg(proof)
         .arg("--input")
         .arg(input)
         .arg("--public-key")
         .arg(public_key)
-        .ok();
-    assert!(result.is_ok());
+        .arg("--proof")
+        .arg(proof)
+        .arg("--output")
+        .arg(output)
+        .output()
+        .unwrap();
 
-    let expected = "Proof verified correctly!\n";
-    let output = String::from_utf8(result.unwrap().stdout).unwrap();
-    assert_eq!(expected, output);
+    assert!(result.status.success());
+    assert_eq!("Proof verified correctly!\n", String::from_utf8_lossy(&result.stdout));
 }
 
 #[test]

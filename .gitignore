@@ -2,8 +2,10 @@
 # will have compiled files and executables
 /target/
 /mangekyou-derive/target
+/kamui-example-program/target
 mangekyou/Cargo.lock
 mangekyou-derive/Cargo.lock
+/evm-vrf
 
 # .DS_Store files
 .DS_Store

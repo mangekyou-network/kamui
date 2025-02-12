@@ -4,6 +4,7 @@ members = [
     "mangekyou",
     "mangekyou-derive",
     "mangekyou-cli",
+    "example-vrf-game"
 ]
 
 # Dependencies that should be kept in sync through the whole workspace
@@ -24,4 +25,3 @@ tracing = "0.1.37"
 subtle = { git = "https://github.com/dalek-cryptography/subtle", rev = "b4b070c", version = "=2.4.1" }
 der = { git = "https://github.com/RustCrypto/formats", package = "der", version = "^0.7.0", rev = "510b74a" }
 curve25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek", rev = "127c9e9", version = "=4.0.0-pre.0" }
-

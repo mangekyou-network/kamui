@@ -1,10 +1,19 @@
 use crate::error::MangekyouError;
 use crate::traits::AllowedRng;
 
-use solana_zk_token_sdk::curve25519::ristretto::{PodRistrettoPoint};
-use solana_zk_token_sdk::curve25519::scalar::{PodScalar};
+use solana_zk_token_sdk::curve25519::ristretto::PodRistrettoPoint;
+use solana_zk_token_sdk::curve25519::scalar::PodScalar;
 
-use curve25519_dalek_ng::scalar::Scalar;
+use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+
+/// The Ristretto basepoint encoded as bytes
+pub const BASEPOINT_BYTES: [u8; 32] = [
+    0xe2, 0xf2, 0xae, 0x0a, 0x6a, 0xbc, 0x4e, 0x71,
+    0xa8, 0x84, 0xa9, 0x61, 0xc5, 0x00, 0x51, 0x5f,
+    0x58, 0xe3, 0x0b, 0x6a, 0xa5, 0x82, 0xdd, 0x8d,
+    0xb6, 0xa6, 0x59, 0x45, 0xe0, 0x8d, 0x2d, 0x76,
+];
 
 /// Represents a public key of which is use to verify outputs for a verifiable random function (VRF).
 pub trait VRFPublicKey {
@@ -67,54 +76,47 @@ pub trait VRFProof<const OUTPUT_SIZE: usize> {
 /// The implementation follows the specifications in draft-irtf-cfrg-vrf-15
 /// (https://datatracker.ietf.org/doc/draft-irtf-cfrg-vrf/).
 pub mod ecvrf {
-    use crate::error::MangekyouError;
-    use curve25519_dalek::scalar::Scalar;
-    use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
-    use curve25519_dalek::constants::{RISTRETTO_BASEPOINT_POINT};
-    use crate::hash::{HashFunction, ReverseWrapper, Sha512};
-    use crate::serde_helpers::ToFromByteArray;
-    use crate::traits::*;
-    use rand_core;
-    use rand::rngs::OsRng;
-    use rand::thread_rng;
-    use crate::kamui_vrf::{VRFKeyPair, VRFPrivateKey, VRFProof, VRFPublicKey};
-    use serde::{Deserialize, Serialize};
-    use zeroize::Zeroize;
-    use solana_zk_token_sdk::curve25519::ristretto::*;
-    use solana_zk_token_sdk::curve25519::scalar::*;
-    use sha2::{Sha256, Digest};
+    use super::*;
+    use crate::hash::{HashFunction, Sha512};
+    use solana_zk_token_sdk::curve25519::{
+        ristretto::*,
+        scalar::*,
+    };
     use borsh::{BorshDeserialize, BorshSerialize};
 
-    // pub struct MyPodRistrettoPoint(PodRistrettoPoint);
-    // pub struct MyPodScalar(PodScalar);
+    #[derive(Clone, Debug)]
+    pub struct WrappedPodScalar(pub(crate) PodScalar);
 
-    // impl BorshSerialize for MyPodScalar {
-    //     fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-    //         writer.write_all(&self.0)
-    //     }
-    // }
-    
-    // impl BorshDeserialize for MyPodScalar {
-    //     fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
-    //         let mut bytes = [0u8; 32];
-    //         reader.read_exact(&mut bytes)?;
-    //         Ok(Self(bytes))
-    //     }
-    // }
-    
-    // impl BorshSerialize for MyPodRistrettoPoint {
-    //     fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-    //         writer.write_all(&self.0)
-    //     }
-    // }
-    
-    // impl BorshDeserialize for MyPodRistrettoPoint {
-    //     fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
-    //         let mut bytes = [0u8; 32];
-    //         reader.read_exact(&mut bytes)?;
-    //         Ok(Self(bytes))
-    //     }
-    // }
+    impl BorshSerialize for WrappedPodScalar {
+        fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+            writer.write_all(&self.0.0)
+        }
+    }
+
+    impl BorshDeserialize for WrappedPodScalar {
+        fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+            let mut bytes = [0u8; 32];
+            reader.read_exact(&mut bytes)?;
+            Ok(Self(PodScalar(bytes)))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct WrappedPodRistrettoPoint(pub(crate) PodRistrettoPoint);
+
+    impl BorshSerialize for WrappedPodRistrettoPoint {
+        fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+            writer.write_all(&self.0.0)
+        }
+    }
+
+    impl BorshDeserialize for WrappedPodRistrettoPoint {
+        fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+            let mut bytes = [0u8; 32];
+            reader.read_exact(&mut bytes)?;
+            Ok(Self(PodRistrettoPoint(bytes)))
+        }
+    }
 
     /// draft-irtf-cfrg-vrf-15 specifies suites for suite-strings 0x00-0x04 and notes that future
     /// designs should specify a different suite_string constant, so we use "sol_vrf" here.
@@ -127,42 +129,86 @@ pub mod ecvrf {
     /// Default hash function
     type H = Sha512;
 
-    /// Domain separation tag used in ecvrf_encode_to_curve (see also draft-irtf-cfrg-hash-to-curve-16)
+    /// Domain separation tag used in ecvrf_encode_to_curve
     const DST: &[u8; 49] = b"ECVRF_ristretto255_XMD:SHA-512_R255MAP_RO_sol_vrf";
     
-    pub struct ECVRFPublicKey(PodRistrettoPoint);
+    /// Domain separation tags for different operations
+    const CHALLENGE_GENERATION_DST: &[u8] = b"sol_vrf_challenge_generation";
+    const NONCE_GENERATION_DST: &[u8] = b"sol_vrf_nonce_generation";
+    const HASH_POINTS_DST: &[u8] = b"sol_vrf_hash_points";
+
+    pub struct ECVRFPublicKey(WrappedPodRistrettoPoint);
 
     impl VRFPublicKey for ECVRFPublicKey {
         type PrivateKey = ECVRFPrivateKey;
     }
 
     impl ECVRFPublicKey {
-        /// Encode the given binary string as curve point. See section 5.4.1.2 of draft-irtf-cfrg-vrf-15.
         fn ecvrf_encode_to_curve_solana(&self, alpha_string: &[u8]) -> PodRistrettoPoint {
-            // Hash the input alpha_string using SHA-256
-            let mut hasher = Sha256::new();
+            // Constants for expand_message_xmd
+            const B_IN_BYTES: usize = 64;  // SHA-512 output size
+            const DST: &[u8] = b"ECVRF_ristretto255_XMD:SHA-512_R255MAP_RO_sol_vrf";
+            const LEN_IN_BYTES: usize = 64;  // We want 64 bytes of output
+
+            // Compute b_0 = H(Z_pad || msg || len || DST || DST_len)
+            let mut hasher = H::default();
+            // Z_pad is a block of zeros
+            hasher.update(&[0u8; 128]);  // SHA-512 block size is 128 bytes
             hasher.update(alpha_string);
-            let hash_output = hasher.finalize();
-            // let mut expanded_message = elliptic_curve::map2curve::ExpandMsgXmd::<
-            //     <H as ReverseWrapper>::Variant,
-            // >::expand_message(
-            //     &[&self.0, alpha_string],
-            //     &[DST],
-            //     H::OUTPUT_SIZE,
-            // )
-            // .unwrap();
+            hasher.update(&[(LEN_IN_BYTES >> 8) as u8, LEN_IN_BYTES as u8]);
+            hasher.update(DST);
+            hasher.update(&[DST.len() as u8]);
+            let b_0 = hasher.finalize();
 
-            // let mut bytes = [0u8; H::OUTPUT_SIZE];
-            // expanded_message.fill_bytes(&mut bytes);
+            // Compute b_1 = H(b_0 || 0x01 || DST || DST_len)
+            let mut hasher = H::default();
+            hasher.update(&b_0.digest);
+            hasher.update(&[1u8]);
+            hasher.update(DST);
+            hasher.update(&[DST.len() as u8]);
+            let b_1 = hasher.finalize();
 
-            // PodRistrettoPoint::from(&RistrettoPoint::from_uniform_bytes(&bytes))
-            PodRistrettoPoint::from(&RISTRETTO_BASEPOINT_POINT)
+            // Compute b_2 = H((b_0 xor b_1) || 0x02 || DST || DST_len)
+            let mut tmp = [0u8; B_IN_BYTES];
+            for i in 0..B_IN_BYTES {
+                tmp[i] = b_0.digest[i] ^ b_1.digest[i];
+            }
+            let mut hasher = H::default();
+            hasher.update(&tmp);
+            hasher.update(&[2u8]);
+            hasher.update(DST);
+            hasher.update(&[DST.len() as u8]);
+            let b_2 = hasher.finalize();
+
+            // Combine b_1 and b_2 to get uniform bytes
+            let mut uniform_bytes = [0u8; 64];
+            uniform_bytes[..32].copy_from_slice(&b_1.digest[..32]);
+            uniform_bytes[32..].copy_from_slice(&b_2.digest[..32]);
+
+            // Map to curve point
+            let mut point_bytes = [0u8; 32];
+            point_bytes.copy_from_slice(&uniform_bytes[..32]);
+            point_bytes[31] &= 0b0111_1111;  // Clear top bit
+
+            // Try to find a valid point
+            let mut attempts = 0;
+            while attempts < 256 {
+                let point = PodRistrettoPoint(point_bytes);
+                if multiply_ristretto(&PodScalar([1; 32]), &point).is_some() {
+                    return point;
+                }
+                point_bytes[0] = point_bytes[0].wrapping_add(1);
+                attempts += 1;
+            }
+
+            // Fallback to basepoint if no valid point found
+            PodRistrettoPoint(BASEPOINT_BYTES)
         }
 
-        /// Implements ECVRF_validate_key which checks the validity of a public key. See section 5.4.5
-        /// of draft-irtf-cfrg-vrf-15.
         fn valid(&self) -> bool {
-            self.0 != PodRistrettoPoint::zeroed()
+            // Simple check for zero point
+            let point_bytes = self.0.0.0;
+            !point_bytes.iter().all(|&x| x == 0)
         }
 
         pub fn from_bytes(bytes: &[u8]) -> Result<Self, std::io::Error> {
@@ -171,26 +217,26 @@ pub mod ecvrf {
             }
             let mut array = [0u8; 32];
             array.copy_from_slice(bytes);
-            Ok(Self(PodRistrettoPoint(array)))
+            Ok(Self(WrappedPodRistrettoPoint(PodRistrettoPoint(array))))
         }
     } 
 
     impl AsRef<[u8]> for ECVRFPublicKey {
         fn as_ref(&self) -> &[u8] {
-            &self.0.0
+            &self.0.0.0
         }
     }
 
-    pub struct ECVRFPrivateKey(PodScalar);
+    #[derive(Clone, Debug)]
+    pub struct ECVRFPrivateKey(WrappedPodScalar);
 
     impl VRFPrivateKey for ECVRFPrivateKey {
         type PublicKey = ECVRFPublicKey;
     }
 
     impl ECVRFPrivateKey {
-        /// Generate scalar/nonce from binary string. See section 5.4.2.2. of draft-irtf-cfrg-vrf-15.
         fn ecvrf_nonce_generation(&self, h_string: &[u8]) -> PodScalar {
-            let hashed_sk_string = H::digest(Scalar::try_from(self.0).unwrap().to_bytes());
+            let hashed_sk_string = H::digest(Scalar::from_bytes_mod_order(self.0.0.0).to_bytes());
             let mut truncated_hashed_sk_string = [0u8; 32];
             truncated_hashed_sk_string.copy_from_slice(&hashed_sk_string.digest[32..64]);
 
@@ -208,13 +254,13 @@ pub mod ecvrf {
             }
             let mut array = [0u8; 32];
             array.copy_from_slice(bytes);
-            Ok(Self(PodScalar(array)))
+            Ok(Self(WrappedPodScalar(PodScalar(array))))
         }
     }
 
     impl AsRef<[u8]> for ECVRFPrivateKey {
         fn as_ref(&self) -> &[u8] {
-            &self.0.0
+            &self.0.0.0
         }
     }
 
@@ -225,12 +271,14 @@ pub mod ecvrf {
 
     /// Generate challenge from five points. See section 5.4.3. of draft-irtf-cfrg-vrf-15.
     fn ecvrf_challenge_generation(points: [&PodRistrettoPoint; 5]) -> Challenge {
-        let mut hash = H::default();
-        hash.update(SUITE_STRING);
-        hash.update([0x02]); //challenge_generation_domain_separator_front
-        points.into_iter().for_each(|p| hash.update(p.0));
-        hash.update([0x00]); //challenge_generation_domain_separator_back
-        let digest = hash.finalize();
+        let mut hasher = H::default();
+        hasher.update(SUITE_STRING);
+        hasher.update([0x02]); // challenge_generation_domain_separator_front
+        for p in points.iter() {
+            hasher.update(&p.0);  // Use compressed point representation
+        }
+        hasher.update([0x00]); // challenge_generation_domain_separator_back
+        let digest = hasher.finalize();
 
         let mut challenge_bytes = [0u8; C_LEN];
         challenge_bytes.copy_from_slice(&digest.digest[..C_LEN]);
@@ -238,15 +286,17 @@ pub mod ecvrf {
     }
 
     /// Type representing a scalar of [C_LEN] bytes. Not targetted to Solana at this time.
-    #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Zeroize)]
-    #[repr(transparent)]
-    struct Challenge([u8; C_LEN]);
+    #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
+    pub struct Challenge([u8; C_LEN]);
 
-    impl From<&Challenge> for PodScalar {
-        fn from(c: &Challenge) -> Self {
-            let mut scalar = [0u8; 32];
-            scalar[..C_LEN].copy_from_slice(&c.0);
-            PodScalar::from(&Scalar::from_bytes_mod_order(scalar))
+    impl Challenge {
+        fn try_from_slice(bytes: &[u8]) -> Result<Self, std::io::Error> {
+            if bytes.len() < C_LEN {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid byte length for Challenge"));
+            }
+            let mut array = [0u8; C_LEN];
+            array.copy_from_slice(&bytes[..C_LEN]);
+            Ok(Self(array))
         }
     }
 
@@ -265,8 +315,8 @@ pub mod ecvrf {
             sk_array.copy_from_slice(sk_bytes);
     
             Ok(Self {
-                pk: ECVRFPublicKey(PodRistrettoPoint(pk_array)),
-                sk: ECVRFPrivateKey(PodScalar(sk_array))
+                pk: ECVRFPublicKey(WrappedPodRistrettoPoint(PodRistrettoPoint(pk_array))),
+                sk: ECVRFPrivateKey(WrappedPodScalar(PodScalar(sk_array)))
             })
         }
     }
@@ -281,69 +331,46 @@ pub mod ecvrf {
             rng.fill_bytes(&mut scalar_bytes);
             
             let s = PodScalar::from(&Scalar::from_bytes_mod_order_wide(&scalar_bytes));
-            ECVRFKeyPair::from(ECVRFPrivateKey(s))
+            ECVRFKeyPair::from(ECVRFPrivateKey(WrappedPodScalar(s)))
         }
         
-
-        // fn prove(&self, alpha_string: &[u8]) -> ECVRFProof {
-        //     // Follows section 5.1 of draft-irtf-cfrg-vrf-15.
-
-        //     let h = self.pk.ecvrf_encode_to_curve(alpha_string);
-        //     let h_string = h.compress();
-        //     let gamma = h * self.sk.0;
-        //     let k = self.sk.ecvrf_nonce_generation(&h_string);
-
-        //     let c = ecvrf_challenge_generation([
-        //         &self.pk.0,
-        //         &h,
-        //         &gamma,
-        //         &(RistrettoPoint::generator() * k),
-        //         &(h * k),
-        //     ]);
-        //     let s = k + Scalar::from(&c) * self.sk.0;
-
-        //     ECVRFProof { gamma, c, s }
-        // }
-
         fn prove(&self, alpha_string: &[u8]) -> ECVRFProof {
-            // Hash the input to a curve point using the public key's method
             let h_point = self.pk.ecvrf_encode_to_curve_solana(alpha_string);
+            let h_string = h_point.0;
+            let gamma = multiply_ristretto(&PodScalar(self.sk.0.0.0), &h_point).unwrap();
+            let k = self.sk.ecvrf_nonce_generation(&h_string);
 
-            // Perform the scalar multiplication k * H to get gamma
-            let gamma = multiply_ristretto(&self.sk.0, &h_point).unwrap();
-    
-            // Generate nonce k using the private key and alpha_string
-            // Here, we simulate the generation of nonce from the hashed combination of private key and alpha_string
-            // This is a simplified version and should be replaced with a secure hash-to-scalar function
-            let k = self.sk.ecvrf_nonce_generation(alpha_string);
-    
-    
-
-    
-            // Compute the challenge c based on the VRF draft specification
-            // This involves hashing certain elements including the public key, gamma, and the original point H
             let c = ecvrf_challenge_generation([
-                &self.pk.0, // Public key as a point
-                &h_point,     // The hashed point of the input
-                &gamma,     // The gamma point from scalar multiplication
-                &multiply_ristretto(&k, &PodRistrettoPoint::from(&RISTRETTO_BASEPOINT_POINT)).unwrap(),
-                &multiply_ristretto(&k, &h_point).unwrap()
+                &PodRistrettoPoint(self.pk.0.0.0),  // Y (public key)
+                &h_point,      // H
+                &gamma,        // Gamma
+                &multiply_ristretto(&k, &PodRistrettoPoint(BASEPOINT_BYTES)).unwrap(), // U = k*B
+                &multiply_ristretto(&k, &h_point).unwrap()  // V = k*H
             ]);
-    
-            // Compute the proof scalar s = (k + c*x) mod q
-            // Where x is the private key scalar, and q is the order of the group
 
-            let s = Scalar::try_from(k).unwrap() + Scalar::try_from(self.sk.0).unwrap() * Scalar::try_from(PodScalar::from(&c)).unwrap();
-    
-            ECVRFProof { gamma, c: c.into(), s: PodScalar::from(s) }
+            let k_scalar = Scalar::from_bytes_mod_order(k.0);
+            let sk_scalar = Scalar::from_bytes_mod_order(self.sk.0.0.0);
+            
+            // Convert challenge to scalar
+            let mut scalar_bytes = [0u8; 32];
+            scalar_bytes[..C_LEN].copy_from_slice(&c.0);
+            let c_scalar = Scalar::from_bytes_mod_order(scalar_bytes);
+            
+            let s = k_scalar + c_scalar * sk_scalar;
+
+            ECVRFProof { 
+                gamma, 
+                c, 
+                s: PodScalar::from(&s)
+            }
         }
     }
 
     impl From<ECVRFPrivateKey> for ECVRFKeyPair {
         fn from(sk: ECVRFPrivateKey) -> Self {
-            let p = PodRistrettoPoint::from(&(RISTRETTO_BASEPOINT_POINT * Scalar::try_from(sk.0).unwrap()));
+            let p = PodRistrettoPoint::from(&(RISTRETTO_BASEPOINT_POINT * Scalar::from_bytes_mod_order(sk.0.0.0)));
             ECVRFKeyPair {
-                pk: ECVRFPublicKey(p),
+                pk: ECVRFPublicKey(WrappedPodRistrettoPoint(p)),
                 sk,
             }
         }
@@ -357,12 +384,12 @@ pub mod ecvrf {
 
     impl ECVRFProof {
         pub fn from_bytes(bytes: &[u8]) -> Result<Self, std::io::Error> {
-            if bytes.len() <= 32 * 2 { // Assuming Challenge is an unknown byte array 
+            if bytes.len() <= 32 * 2 { 
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid byte length for ECVRFProof"));
             }
             let gamma_bytes = &bytes[0..32];
-            let s_bytes = &bytes[32..64];
-            let c_bytes = &bytes[64..bytes.len()];
+            let c_bytes = &bytes[32..32+C_LEN];  // Challenge is C_LEN bytes
+            let s_bytes = &bytes[32+C_LEN..32+C_LEN+32];  // Last 32 bytes are the scalar
     
             let mut gamma_array = [0u8; 32];
             let mut s_array = [0u8; 32];
@@ -372,7 +399,7 @@ pub mod ecvrf {
     
             Ok(Self {
                 gamma: PodRistrettoPoint(gamma_array),
-                c: Challenge::try_from_slice(&c_bytes).unwrap(), // Assuming Challenge has a from_bytes method
+                c: Challenge::try_from_slice(c_bytes).unwrap(),
                 s: PodScalar(s_array),
             })
         }
@@ -381,55 +408,46 @@ pub mod ecvrf {
     impl VRFProof<64> for ECVRFProof {
         type PublicKey = ECVRFPublicKey;
 
-
         fn verify(
             &self,
             alpha_string: &[u8],
             public_key: &Self::PublicKey,
         ) -> Result<(), MangekyouError> {
-            // Ensure the public key is valid
             if !public_key.valid() {
                 return Err(MangekyouError::InvalidInput);
             }
-    
-            // Encode the input alpha_string to a curve point using the public key method
+
             let h_point = public_key.ecvrf_encode_to_curve_solana(alpha_string);
-    
-            // Convert the gamma (RistrettoPoint) from the proof to PodRistrettoPoint for operations
-            let gamma_pod = PodRistrettoPoint::from(self.gamma);
-    
-            // Convert the challenge and scalar from the proof to PodScalar for operations
-            let challenge_pod = PodScalar::from(&self.c);
-            let neg_challenge= -Scalar::try_from(challenge_pod.clone()).unwrap();
-            // let s_pod = PodScalar::from(Scalar::from_bytes_mod_order_wide(&self.s.0));
-    
-            // Compute U = s*B - c*Y using multiscalar multiplication
+            
+            // Convert challenge to scalar and negate it using Solana's operations
+            let mut c_scalar = [0u8; 32];
+            c_scalar[..C_LEN].copy_from_slice(&self.c.0);
+            let neg_challenge = negate_scalar(&PodScalar(c_scalar));
+
+            // Compute U = s*B - c*Y using Solana's multiscalar multiplication
             let u_point = multiscalar_multiply_ristretto(
-                &[self.s, PodScalar::from(neg_challenge)],
-                &[PodRistrettoPoint::from(&RISTRETTO_BASEPOINT_POINT), PodRistrettoPoint::from(public_key.0)],
-            ).ok_or(MangekyouError::InvalidInput);
-    
-            // Compute V = s*H - c*Gamma using multiscalar multiplication
+                &[self.s, neg_challenge],
+                &[PodRistrettoPoint(BASEPOINT_BYTES), PodRistrettoPoint(public_key.0.0.0)],
+            ).ok_or(MangekyouError::InvalidInput)?;
+
+            // Compute V = s*H - c*Gamma using Solana's multiscalar multiplication
             let v_point = multiscalar_multiply_ristretto(
-                &[self.s, PodScalar::from(neg_challenge)],
-                &[PodRistrettoPoint::from(h_point), gamma_pod],
-            ).ok_or(MangekyouError::InvalidInput);
-    
-            // Recompute the challenge c' using the ecvrf_challenge_generation function
-            let c_prime_bytes = ecvrf_challenge_generation([
-                &public_key.0,
-                &h_point,
-                &self.gamma,
-                &PodRistrettoPoint::from(u_point.unwrap()),
-                &PodRistrettoPoint::from(v_point.unwrap()),
+                &[self.s, neg_challenge],
+                &[h_point, self.gamma],
+            ).ok_or(MangekyouError::InvalidInput)?;
+
+            let c_prime = ecvrf_challenge_generation([
+                &PodRistrettoPoint(public_key.0.0.0),    // Y (public key)
+                &h_point,             // H
+                &self.gamma,          // Gamma
+                &u_point,             // U = s*B - c*Y
+                &v_point,             // V = s*H - c*Gamma
             ]);
-            // let c_prime = PodScalar::from(&Scalar::from_bytes_mod_order_wide(&c_prime_bytes.0));
-    
-            // Check if the recomputed challenge matches the original challenge
-            if c_prime_bytes != self.c {
+
+            if c_prime != self.c {
                 return Err(MangekyouError::GeneralOpaqueError);
             }
-    
+
             Ok(())
         }
 
@@ -445,18 +463,85 @@ pub mod ecvrf {
 
         fn to_bytes(&self) -> Vec<u8> {
             // Convert each field to a byte array and concatenate them
-            let gamma_bytes = self.gamma.0; 
-    
+            let gamma_bytes = self.gamma.0;
+            
             let mut c_buffer: Vec<u8> = Vec::new();
             self.c.serialize(&mut c_buffer);
+            
+            let s_bytes = self.s.0;
     
-            // Convert Vec<u8> to [u8; 32]
-            let c_bytes = c_buffer;
-            let s_bytes = self.s.0; 
-    
-            // Concatenate gamma_bytes, c_bytes, and s_bytes into a single byte array
-            let concatenated = [gamma_bytes.as_ref(), s_bytes.as_ref(), c_bytes.as_ref()].concat();
+            let concatenated = [gamma_bytes.as_ref(), c_buffer.as_ref(), s_bytes.as_ref()].concat();
             concatenated
         }
     }
+
+    // Add these implementations after the wrapper type definitions
+    impl From<&WrappedPodScalar> for PodScalar {
+        fn from(w: &WrappedPodScalar) -> Self {
+            w.0.clone()
+        }
+    }
+
+    impl From<&WrappedPodRistrettoPoint> for PodRistrettoPoint {
+        fn from(w: &WrappedPodRistrettoPoint) -> Self {
+            w.0.clone()
+        }
+    }
+
+    impl From<PodScalar> for WrappedPodScalar {
+        fn from(p: PodScalar) -> Self {
+            Self(p)
+        }
+    }
+
+    impl From<PodRistrettoPoint> for WrappedPodRistrettoPoint {
+        fn from(p: PodRistrettoPoint) -> Self {
+            Self(p)
+        }
+    }
+
+    // Add conversion to Scalar
+    impl TryFrom<&WrappedPodScalar> for Scalar {
+        type Error = MangekyouError;
+
+        fn try_from(value: &WrappedPodScalar) -> Result<Self, Self::Error> {
+            Scalar::try_from(value.0.clone()).map_err(|_| MangekyouError::InvalidInput)
+        }
+    }
+
+    /// Helper function to convert bytes to PodScalar
+    fn bytes_to_scalar(bytes: &[u8]) -> PodScalar {
+        let mut scalar = [0u8; 32];
+        scalar[..bytes.len()].copy_from_slice(bytes);
+        PodScalar(scalar)
+    }
+
+    /// Helper function for scalar negation that only uses Solana's types
+    fn negate_scalar(scalar: &PodScalar) -> PodScalar {
+        let mut neg_bytes = [0u8; 32];
+        let mut carry = 0i16;
+        
+        // L - x mod L, where L is the order of the curve
+        let order = [
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+            0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+        ];
+        
+        // Compute L - x in constant time
+        for i in 0..32 {
+            let diff = order[i] as i16 - scalar.0[i] as i16 - carry;
+            if diff < 0 {
+                carry = 1;
+                neg_bytes[i] = (diff + 256) as u8;
+            } else {
+                carry = 0;
+                neg_bytes[i] = diff as u8;
+            }
+        }
+        
+        PodScalar(neg_bytes)
+    }
 }
+
