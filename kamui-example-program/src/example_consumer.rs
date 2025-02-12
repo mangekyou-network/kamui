@@ -5,15 +5,17 @@ use {
         entrypoint::ProgramResult,
         msg,
         program::{invoke, invoke_signed},
-        program_error::ProgramError,
         pubkey::Pubkey,
-        rent::Rent,
         system_instruction,
+        system_program,
+        program_error::ProgramError,
+        rent::Rent,
         sysvar::Sysvar,
     },
+    std::str::FromStr,
     crate::{
         instruction::VrfCoordinatorInstruction,
-        state::Subscription,
+        state::{VrfResult, Subscription},
     },
 };
 
@@ -100,43 +102,28 @@ fn process_initialize(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
         is_pending: false,
     };
 
-    // Get the exact size needed
-    let serialized = borsh::to_vec(&state)?;
-    let space = serialized.len();
-    msg!("Required space: {}", space);
-    msg!("Serialized data: {:?}", serialized);
-
+    // Create game state account
+    let space = 8 + borsh::to_vec(&state)?.len();
     let rent = Rent::get()?;
     let lamports = rent.minimum_balance(space);
 
-    msg!("Creating account with {} lamports and {} bytes", lamports, space);
-
-    // Create PDA account with our program as owner
     invoke_signed(
         &system_instruction::create_account(
             owner.key,
             game_state.key,
             lamports,
             space as u64,
-            program_id,  // This is the key - setting our program as the owner
+            program_id,
         ),
-        &[
-            owner.clone(),
-            game_state.clone(),
-            system_program.clone(),
-        ],
+        &[owner.clone(), game_state.clone(), system_program.clone()],
         &[&[b"game_state", owner.key.as_ref(), &[bump]]],
     )?;
 
-    msg!("Account created with owner: {}", program_id);
-    msg!("Account size: {}", game_state.data_len());
-
-    // Initialize the account data
+    // Write discriminator and state
     let mut data = game_state.try_borrow_mut_data()?;
-    data[..serialized.len()].copy_from_slice(&serialized);
-    msg!("Written data: {:?}", &data[..]);
+    data[0..8].copy_from_slice(b"GAMESTAT");
+    state.serialize(&mut &mut data[8..])?;
 
-    msg!("Data initialized");
     Ok(())
 }
 
@@ -167,7 +154,7 @@ fn process_request_number(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         return Err(ProgramError::InvalidSeeds);
     }
 
-    let mut state = GameState::try_from_slice(&game_state.data.borrow())?;
+    let mut state = GameState::try_from_slice(&game_state.data.borrow()[8..])?;  // Skip discriminator
     if state.owner != *owner.key {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -224,35 +211,73 @@ fn process_request_number(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         ],
     )?;
 
+    // Update and write back game state
     state.is_pending = true;
     let mut data = game_state.try_borrow_mut_data()?;
-    let serialized = borsh::to_vec(&state)?;
-    data[..serialized.len()].copy_from_slice(&serialized);
+    state.serialize(&mut &mut data[8..])?;
 
     Ok(())
 }
 
-fn process_consume_randomness(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+pub fn process_consume_randomness(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
     let vrf_result = next_account_info(accounts_iter)?;
-    let vrf_request = next_account_info(accounts_iter)?;
+    let request_account = next_account_info(accounts_iter)?;
     let game_state = next_account_info(accounts_iter)?;
 
-    let mut state = GameState::try_from_slice(&game_state.data.borrow())?;
-    if !state.is_pending {
+    // Verify game state account owner
+    if game_state.owner != program_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+
+    // Deserialize the game state first to get the owner
+    let state = GameState::try_from_slice(&game_state.data.borrow()[8..])?;
+
+    // Verify game state PDA
+    let (expected_game_state, _bump) = Pubkey::find_program_address(
+        &[b"game_state", state.owner.as_ref()],
+        program_id
+    );
+    if expected_game_state != *game_state.key {
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    // Get VRF coordinator program ID
+    let vrf_coordinator_id = Pubkey::from_str("1111111QLbz7JHiBTspS962RLKV8GndWFwiEaqKM").unwrap();
+
+    // Verify VRF result account owner
+    if vrf_result.owner != &vrf_coordinator_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+
+    // Verify request account owner
+    if request_account.owner != &vrf_coordinator_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+
+    // Deserialize the VRF result
+    let vrf_result_data = VrfResult::try_from_slice(&vrf_result.data.borrow()[8..])?;
+
+    // Ensure we have at least one randomness value
+    if vrf_result_data.randomness.is_empty() {
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // Extract randomness from VRF result
-    let result_data = vrf_result.data.borrow();
-    let randomness = result_data[0] as u64 % 100 + 1;
+    // Take the first 8 bytes of the first randomness value and convert to u64
+    let random_bytes = &vrf_result_data.randomness[0][0..8];
+    let random_value = u64::from_le_bytes(random_bytes.try_into().unwrap());
     
-    msg!("Received random number: {}", randomness);
-    
-    // Update game state
-    state.current_number = randomness as u8;
+    // Update game state with new random number (1-100)
+    let mut state = state;  // Make state mutable
+    state.current_number = ((random_value % 100) + 1) as u8;
     state.is_pending = false;
-    state.serialize(&mut *game_state.data.borrow_mut())?;
+
+    // Write back the updated state (skip discriminator)
+    let mut data = game_state.try_borrow_mut_data()?;
+    state.serialize(&mut &mut data[8..])?;
 
     Ok(())
 }

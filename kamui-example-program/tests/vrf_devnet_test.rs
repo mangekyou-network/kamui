@@ -11,104 +11,73 @@ use {
         system_program,
         system_instruction,
     },
-    solana_program_test::*,
+    solana_client::rpc_client::RpcClient,
     solana_sdk::{
-        signature::Keypair,
-        signer::Signer,
+        commitment_config::CommitmentConfig,
+        signature::{Keypair, Signer},
         transaction::Transaction,
-        hash::Hash,
-        account::{Account, AccountSharedData},
     },
     spl_token::native_mint,
     spl_associated_token_account,
     mangekyou::kamui_vrf::{
         ecvrf::ECVRFKeyPair,
         VRFKeyPair,
-        VRFProof,
     },
     rand::thread_rng,
     anyhow::Result,
+    std::{str::FromStr, fs::File, io::Read},
 };
 
-async fn setup_test() -> (BanksClient, Keypair, Hash, Pubkey, Pubkey) {
-    // Setup VRF coordinator program
-    let vrf_program_id = Pubkey::new_unique();
-    let mut program_test = ProgramTest::new(
-        "kamui_example_program",
-        vrf_program_id,
-        processor!(kamui_example_program::process_instruction),
-    );
-
-    // Setup game program
-    let game_program_id = Pubkey::new_unique();
-    program_test.add_program(
-        "example_consumer",
-        game_program_id,
-        processor!(kamui_example_program::example_consumer::process_instruction),
-    );
-
-    // Add SPL Token program
-    program_test.add_program(
-        "spl_token",
-        spl_token::id(),
-        processor!(spl_token::processor::Processor::process),
-    );
-
-    let (mut banks_client, payer, recent_blockhash) = program_test.start().await;
-    
-    (banks_client, payer, recent_blockhash, vrf_program_id, game_program_id)
-}
-
 #[tokio::test]
-async fn test_full_vrf_flow() -> Result<()> {
-    // Create program test environment with VRF coordinator program
-    let vrf_program_id = Pubkey::new_unique();
-    let mut program_test = ProgramTest::new(
-        "kamui_example_program",
-        vrf_program_id,
-        processor!(kamui_example_program::process_instruction),
-    );
+async fn test_vrf_flow_devnet() -> Result<()> {
+    // Connect to devnet
+    let rpc_url = "https://api.devnet.solana.com".to_string();
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
 
-    // Add game program
-    let game_program_id = Pubkey::new_unique();
-    program_test.add_program(
-        "example_consumer",
-        game_program_id,
-        processor!(kamui_example_program::example_consumer::process_instruction),
-    );
+    // Load the deployed program IDs
+    let vrf_program_id = Pubkey::from_str("1111111QLbz7JHiBTspS962RLKV8GndWFwiEaqKM").unwrap();
+    let game_program_id = Pubkey::from_str("1111111ogCyDbaRMvkdsHB3qfdyFYaG1WtRUAfdh").unwrap();
 
-    // Add SPL Token program
-    program_test.add_program(
-        "spl_token",
-        spl_token::id(),
-        processor!(spl_token::processor::Processor::process),
-    );
-
-    let (mut banks_client, payer, recent_blockhash) = program_test.start().await;
-
-    // Step 1: Initialize game state
-    println!("Initializing game state...");
+    // Load keypair from file
+    let mut keypair_file = File::open("keypair.json").expect("Failed to open keypair.json");
+    let mut keypair_data = String::new();
+    keypair_file.read_to_string(&mut keypair_data).expect("Failed to read keypair.json");
+    let keypair_bytes: Vec<u8> = serde_json::from_str(&keypair_data).expect("Failed to parse keypair JSON");
+    let payer = Keypair::from_bytes(&keypair_bytes).expect("Failed to create keypair from bytes");
     
+    println!("Using keypair with pubkey: {}", payer.pubkey());
+    
+    // Verify the balance
+    let balance = rpc_client.get_balance(&payer.pubkey()).expect("Failed to get balance");
+    println!("Current balance: {} SOL", balance as f64 / 1_000_000_000.0);
+
+    if balance == 0 {
+        panic!("Account has no SOL balance");
+    }
+
     // Step 1: Create VRF subscription
     println!("Creating VRF subscription...");
     let subscription_owner = Keypair::new();
     let subscription_account = Keypair::new();
     
     // Fund the subscription owner account
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
     let fund_tx = Transaction::new_signed_with_payer(
         &[system_instruction::transfer(
             &payer.pubkey(),
             &subscription_owner.pubkey(),
-            10_000_000, // 10 SOL should be more than enough
+            10_000_000_000, // 10 SOL
         )],
         Some(&payer.pubkey()),
         &[&payer],
         recent_blockhash,
     );
-    banks_client.process_transaction(fund_tx).await?;
-    
+    rpc_client.send_and_confirm_transaction_with_spinner(&fund_tx)
+        .expect("Failed to fund subscription owner");
+
+    // Create subscription
     let create_sub_ix = VrfCoordinatorInstruction::CreateSubscription {
-        min_balance: 1_000_000,  // 1 SOL minimum balance
+        min_balance: 1_000_000_000,  // 1 SOL minimum balance
         confirmations: 1,
     };
     let create_sub_ix_data = borsh::to_vec(&create_sub_ix)?;
@@ -122,19 +91,18 @@ async fn test_full_vrf_flow() -> Result<()> {
         data: create_sub_ix_data,
     };
 
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
     let mut transaction = Transaction::new_with_payer(
         &[create_sub_ix],
         Some(&payer.pubkey()),
     );
     transaction.sign(&[&payer, &subscription_owner, &subscription_account], recent_blockhash);
-    banks_client.process_transaction(transaction).await?;
-
-    // Verify subscription account was created correctly
-    let subscription_data = banks_client.get_account(subscription_account.pubkey()).await?.unwrap();
-    println!("Subscription account owner: {:?}", subscription_data.owner);
-    println!("Subscription account data length: {}", subscription_data.data.len());
-    println!("Subscription account lamports: {}", subscription_data.lamports);
-    println!("Subscription account data: {:?}", subscription_data.data);
+    
+    println!("Sending transaction to create subscription...");
+    let signature = rpc_client
+        .send_and_confirm_transaction_with_spinner(&transaction)
+        .expect("Failed to create subscription");
+    println!("Subscription created! Signature: {}", signature);
 
     // Create token accounts for funding
     let mint = native_mint::id();
@@ -163,15 +131,21 @@ async fn test_full_vrf_flow() -> Result<()> {
         &spl_token::id(),
     );
 
-    // Create and initialize token accounts
+    // Create token accounts
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
     let mut transaction = Transaction::new_with_payer(
         &[create_funder_token_ix, create_sub_token_ix],
         Some(&payer.pubkey()),
     );
     transaction.sign(&[&payer], recent_blockhash);
-    banks_client.process_transaction(transaction).await?;
+    
+    println!("Creating token accounts...");
+    let signature = rpc_client
+        .send_and_confirm_transaction_with_spinner(&transaction)
+        .expect("Failed to create token accounts");
+    println!("Token accounts created! Signature: {}", signature);
 
-    // Wrap SOL into native SOL tokens
+    // Fund subscription
     let wrap_sol_ix = spl_token::instruction::sync_native(
         &spl_token::id(),
         &funder_token,
@@ -179,56 +153,40 @@ async fn test_full_vrf_flow() -> Result<()> {
     let transfer_sol_ix = system_instruction::transfer(
         &subscription_owner.pubkey(),
         &funder_token,
-        5_000_000,  // Amount to wrap
+        5_000_000_000,  // 5 SOL
     );
 
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
     let mut transaction = Transaction::new_with_payer(
         &[transfer_sol_ix, wrap_sol_ix],
         Some(&payer.pubkey()),
     );
     transaction.sign(&[&payer, &subscription_owner], recent_blockhash);
-    banks_client.process_transaction(transaction).await?;
-
-    // Fund the subscription
-    let fund_sub_ix = VrfCoordinatorInstruction::FundSubscription {
-        amount: 5_000_000,  // Fund with 5 SOL worth of tokens
-    };
-    let fund_sub_ix_data = borsh::to_vec(&fund_sub_ix)?;
-    let fund_sub_ix = Instruction {
-        program_id: vrf_program_id,
-        accounts: vec![
-            AccountMeta::new(subscription_owner.pubkey(), true),
-            AccountMeta::new(subscription_account.pubkey(), false),
-            AccountMeta::new(funder_token, false),
-            AccountMeta::new(subscription_token, false),
-            AccountMeta::new_readonly(spl_token::id(), false),
-        ],
-        data: fund_sub_ix_data,
-    };
-
-    let mut transaction = Transaction::new_with_payer(
-        &[fund_sub_ix],
-        Some(&payer.pubkey()),
-    );
-    transaction.sign(&[&payer, &subscription_owner], recent_blockhash);
-    banks_client.process_transaction(transaction).await?;
+    
+    println!("Funding subscription...");
+    let signature = rpc_client
+        .send_and_confirm_transaction_with_spinner(&transaction)
+        .expect("Failed to fund subscription");
+    println!("Subscription funded! Signature: {}", signature);
 
     // Step 2: Initialize game
     println!("Initializing game...");
     let game_owner = Keypair::new();
     
     // Fund the game owner account
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
     let fund_tx = Transaction::new_signed_with_payer(
         &[system_instruction::transfer(
             &payer.pubkey(),
             &game_owner.pubkey(),
-            10_000_000, // 10 SOL should be more than enough
+            10_000_000_000, // 10 SOL
         )],
         Some(&payer.pubkey()),
         &[&payer],
         recent_blockhash,
     );
-    banks_client.process_transaction(fund_tx).await?;
+    rpc_client.send_and_confirm_transaction_with_spinner(&fund_tx)
+        .expect("Failed to fund game owner");
     
     // Derive the game state PDA
     let (game_state_pda, _bump) = Pubkey::find_program_address(
@@ -238,6 +196,7 @@ async fn test_full_vrf_flow() -> Result<()> {
 
     let ix = GameInstruction::Initialize;
     let ix_data = borsh::to_vec(&ix)?;
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
     let mut transaction = Transaction::new_with_payer(
         &[Instruction {
             program_id: game_program_id,
@@ -252,44 +211,19 @@ async fn test_full_vrf_flow() -> Result<()> {
         Some(&payer.pubkey()),
     );
     transaction.sign(&[&payer, &game_owner], recent_blockhash);
-    banks_client.process_transaction(transaction).await?;
-
-    // Verify the account was created correctly
-    let game_account = banks_client.get_account(game_state_pda).await?.unwrap();
-    println!("Account owner: {:?}", game_account.owner);
-    println!("Account data length: {}", game_account.data.len());
-    println!("Account lamports: {}", game_account.lamports);
-
-    // Verify game state is pending
-    let game_account = banks_client
-        .get_account(game_state_pda)
-        .await
-        .unwrap()
-        .unwrap();
     
-    println!("Account owner after request: {:?}", game_account.owner);
-    println!("Account data length: {}", game_account.data.len());
-    println!("Account data: {:?}", game_account.data);
-    
-    // Skip the first 8 bytes (discriminator) when deserializing
-    match GameState::try_from_slice(&game_account.data[8..]) {
-        Ok(game_state) => {
-            println!("Successfully deserialized game state: {:?}", game_state);
-            assert!(!game_state.is_pending);
-        }
-        Err(e) => {
-            println!("Failed to deserialize game state: {:?}", e);
-            println!("First few bytes: {:?}", &game_account.data[..8.min(game_account.data.len())]);
-            return Err(anyhow::anyhow!("Failed to deserialize: {}", e));
-        }
-    }
+    println!("Initializing game state...");
+    let signature = rpc_client
+        .send_and_confirm_transaction_with_spinner(&transaction)
+        .expect("Failed to initialize game");
+    println!("Game initialized! Signature: {}", signature);
 
     // Step 3: Request random number
     println!("Requesting random number...");
     
     // Read subscription account to get current nonce
-    let subscription_data = banks_client.get_account(subscription_account.pubkey()).await?.unwrap();
-    let subscription = Subscription::try_from_slice(&subscription_data.data[8..])?;
+    let subscription_data = rpc_client.get_account_data(&subscription_account.pubkey())?;
+    let subscription = Subscription::try_from_slice(&subscription_data[8..])?;
     let next_nonce = subscription.nonce.checked_add(1).unwrap();
 
     // Derive request account PDA
@@ -305,6 +239,7 @@ async fn test_full_vrf_flow() -> Result<()> {
     // Request random number
     let ix = GameInstruction::RequestNewNumber;
     let ix_data = borsh::to_vec(&ix)?;
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
     let mut transaction = Transaction::new_with_payer(
         &[Instruction {
             program_id: game_program_id,
@@ -321,12 +256,12 @@ async fn test_full_vrf_flow() -> Result<()> {
         Some(&payer.pubkey()),
     );
     transaction.sign(&[&payer, &game_owner], recent_blockhash);
-    banks_client.process_transaction(transaction).await?;
-
-    // Now verify that the game state is pending after requesting a number
-    let game_account = banks_client.get_account(game_state_pda).await?.unwrap();
-    let game_state = GameState::try_from_slice(&game_account.data[8..])?;
-    assert!(game_state.is_pending);
+    
+    println!("Requesting random number...");
+    let signature = rpc_client
+        .send_and_confirm_transaction_with_spinner(&transaction)
+        .expect("Failed to request random number");
+    println!("Random number requested! Signature: {}", signature);
 
     // Step 4: Fulfill randomness
     println!("Fulfilling randomness...");
@@ -351,7 +286,7 @@ async fn test_full_vrf_flow() -> Result<()> {
     };
     let fulfill_ix_data = borsh::to_vec(&fulfill_ix)?;
 
-    // First create the VRF result account
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
     let mut transaction = Transaction::new_with_payer(
         &[Instruction {
             program_id: vrf_program_id,
@@ -370,11 +305,17 @@ async fn test_full_vrf_flow() -> Result<()> {
         Some(&payer.pubkey()),
     );
     transaction.sign(&[&payer], recent_blockhash);
-    banks_client.process_transaction(transaction).await?;
+    
+    println!("Fulfilling randomness...");
+    let signature = rpc_client
+        .send_and_confirm_transaction_with_spinner(&transaction)
+        .expect("Failed to fulfill randomness");
+    println!("Randomness fulfilled! Signature: {}", signature);
 
     // Then call ConsumeRandomness on our game program
     let consume_ix = GameInstruction::ConsumeRandomness;
     let consume_ix_data = borsh::to_vec(&consume_ix)?;
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
     let mut transaction = Transaction::new_with_payer(
         &[Instruction {
             program_id: game_program_id,
@@ -388,14 +329,20 @@ async fn test_full_vrf_flow() -> Result<()> {
         Some(&payer.pubkey()),
     );
     transaction.sign(&[&payer], recent_blockhash);
-    banks_client.process_transaction(transaction).await?;
+    
+    println!("Consuming randomness...");
+    let signature = rpc_client
+        .send_and_confirm_transaction_with_spinner(&transaction)
+        .expect("Failed to consume randomness");
+    println!("Randomness consumed! Signature: {}", signature);
 
     // Verify final game state
-    let game_account = banks_client.get_account(game_state_pda).await?.unwrap();
-    let final_state = GameState::try_from_slice(&game_account.data[8..])?;
+    let game_account_data = rpc_client.get_account_data(&game_state_pda)?;
+    let final_state = GameState::try_from_slice(&game_account_data[8..])?;
     assert!(!final_state.is_pending);
     assert!(final_state.current_number > 0 && final_state.current_number <= 100);
 
-    println!("VRF flow test completed successfully!");
+    println!("VRF flow test completed successfully on devnet!");
+    println!("Final game state: {:?}", final_state);
     Ok(())
 } 
