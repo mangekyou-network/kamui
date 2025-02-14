@@ -219,16 +219,20 @@ impl Processor {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        // Verify request account PDA - now using requester key for deterministic address
+        // Verify request account PDA - using subscription nonce for deterministic address
+        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow()[8..])?;
         let (expected_request, bump) = Pubkey::find_program_address(
-            &[b"request", requester.key.as_ref()],
+            &[
+                b"request",
+                subscription_account.key.as_ref(),
+                subscription.nonce.to_le_bytes().as_ref(),
+            ],
             program_id
         );
         if expected_request != *request_account.key {
             return Err(ProgramError::InvalidSeeds);
         }
 
-        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow()[8..])?;
         if subscription.balance < subscription.min_balance {
             return Err(VrfCoordinatorError::InsufficientBalance.into());
         }
@@ -274,7 +278,12 @@ impl Processor {
                     request_account.clone(),
                     system_program.clone(),
                 ],
-                &[&[b"request", requester.key.as_ref(), &[bump]]],
+                &[&[
+                    b"request",
+                    subscription_account.key.as_ref(),
+                    subscription.nonce.to_le_bytes().as_ref(),
+                    &[bump]
+                ]],
             )?;
 
             // Initialize request account data
@@ -324,17 +333,10 @@ impl Processor {
             return Err(VrfCoordinatorError::InvalidOracleSigner.into());
         }
 
-        // Verify VRF result account PDA - now using requester key for deterministic address
-        let request = RandomnessRequest::try_from_slice(&request_account.data.borrow()[8..])?;
-        let (expected_vrf_result, bump) = Pubkey::find_program_address(
-            &[b"vrf_result", request.requester.as_ref()],
-            program_id
-        );
-        if expected_vrf_result != *vrf_result_account.key {
-            return Err(ProgramError::InvalidSeeds);
-        }
-
-        let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow()[8..])?;
+        // Get request data upfront
+        let mut request = RandomnessRequest::try_from_slice(&request_account.data.borrow()[8..])?;
+        let callback_data = request.callback_data.clone();
+        let requester = request.requester;
 
         // Generate randomness from VRF output
         let mut randomness = [0u8; 64];
@@ -356,6 +358,15 @@ impl Processor {
             let rent = Rent::get()?;
             let lamports = rent.minimum_balance(space);
 
+            // Verify VRF result PDA
+            let (expected_vrf_result, bump) = Pubkey::find_program_address(
+                &[b"vrf_result", requester.as_ref()],
+                program_id
+            );
+            if expected_vrf_result != *vrf_result_account.key {
+                return Err(ProgramError::InvalidSeeds);
+            }
+
             invoke_signed(
                 &system_instruction::create_account(
                     oracle.key,
@@ -369,37 +380,41 @@ impl Processor {
                     vrf_result_account.clone(),
                     system_program.clone(),
                 ],
-                &[&[b"vrf_result", request.requester.as_ref(), &[bump]]],
+                &[&[b"vrf_result", requester.as_ref(), &[bump]]],
             )?;
         }
 
         // Write VRF result data
-        let mut data = vrf_result_account.try_borrow_mut_data()?;
-        data[0..8].copy_from_slice(&[86, 82, 70, 82, 83, 76, 84, 0]); // "VRFRSLT\0"
-        vrf_result.serialize(&mut &mut data[8..])?;
+        {
+            let mut data = vrf_result_account.try_borrow_mut_data()?;
+            data[0..8].copy_from_slice(&[86, 82, 70, 82, 83, 76, 84, 0]); // "VRFRSLT\0"
+            vrf_result.serialize(&mut &mut data[8..])?;
+        }
 
         // Update request status
-        request.status = RequestStatus::Fulfilled;
-        let mut data = request_account.try_borrow_mut_data()?;
-        data[0..8].copy_from_slice(&[82, 69, 81, 85, 69, 83, 84, 0]); // "REQUEST\0"
-        request.serialize(&mut &mut data[8..])?;
+        {
+            request.status = RequestStatus::Fulfilled;
+            let mut data = request_account.try_borrow_mut_data()?;
+            data[0..8].copy_from_slice(&[82, 69, 81, 85, 69, 83, 84, 0]); // "REQUEST\0"
+            request.serialize(&mut &mut data[8..])?;
+        }
 
         // Update subscription balance
-        subscription.balance = subscription.balance.checked_add(subscription.min_balance)
-            .ok_or(ProgramError::InvalidInstructionData)?;
-        
-        // Write back subscription
-        let mut data = subscription_account.try_borrow_mut_data()?;
-        data[0..8].copy_from_slice(&[83, 85, 66, 83, 67, 82, 73, 80]); // "SUBSCRIP"
-        subscription.serialize(&mut &mut data[8..])?;
-
-        // Store callback data before dropping request
-        let callback_data = request.callback_data.clone();
+        {
+            let mut subscription = Subscription::try_from_slice(&subscription_account.data.borrow()[8..])?;
+            subscription.balance = subscription.balance.checked_add(subscription.min_balance)
+                .ok_or(ProgramError::InvalidInstructionData)?;
+            
+            // Write back subscription
+            let mut data = subscription_account.try_borrow_mut_data()?;
+            data[0..8].copy_from_slice(&[83, 85, 66, 83, 67, 82, 73, 80]); // "SUBSCRIP"
+            subscription.serialize(&mut &mut data[8..])?;
+        }
 
         // Emit randomness fulfilled event
         VrfEvent::RandomnessFulfilled {
             request_id: *request_account.key,
-            requester: request.requester,
+            requester,
             randomness,
         }.emit();
 
@@ -412,7 +427,7 @@ impl Processor {
 
         // Get the game state PDA seeds
         let (game_state_pda, game_state_bump) = Pubkey::find_program_address(
-            &[b"game_state", request.requester.as_ref()],
+            &[b"game_state", requester.as_ref()],
             game_program.key
         );
         msg!("VRF Coordinator: Expected game state PDA: {}", game_state_pda);
@@ -428,7 +443,7 @@ impl Processor {
                 vec![
                     AccountMeta::new_readonly(*vrf_result_account.key, false),
                     AccountMeta::new_readonly(*request_account.key, false),
-                    AccountMeta::new(*game_state.key, true),
+                    AccountMeta::new(*game_state.key, false),
                 ],
             ),
             &[
@@ -436,7 +451,7 @@ impl Processor {
                 request_account.clone(),
                 game_state.clone(),
             ],
-            &[&[b"game_state", request.requester.as_ref(), &[game_state_bump]]],
+            &[],  // No need to sign with game state PDA since it's owned by the game program
         )?;
 
         msg!("VRF Coordinator: CPI call completed successfully");
