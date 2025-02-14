@@ -268,7 +268,7 @@ fn process_consume_randomness(program_id: &Pubkey, accounts: &[AccountInfo]) -> 
 
     // Verify VRF result PDA
     let (expected_vrf_result, _) = Pubkey::find_program_address(
-        &[b"vrf_result", request_account.key.as_ref()],
+        &[b"vrf_result", state.owner.as_ref()],
         &vrf_coordinator_id
     );
     if expected_vrf_result != *vrf_result.key {

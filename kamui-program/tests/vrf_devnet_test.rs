@@ -1,7 +1,7 @@
 use {
     borsh::{BorshDeserialize, BorshSerialize},
     kamui_program::{
-        instruction::VrfCoordinatorInstruction,
+        instruction::{VrfCoordinatorInstruction, VerifyVrfInput},
         state::Subscription,
     },
     solana_program::{
@@ -28,6 +28,7 @@ use {
     anyhow::Result,
     std::{str::FromStr, fs::File, io::Read},
     serde_json,
+    hex,
 };
 
 // Game-related structures for testing
@@ -70,6 +71,7 @@ async fn test_vrf_flow_devnet() -> Result<()> {
     // Load program IDs
     let vrf_program_id = Pubkey::from_str("BfwfooykCSdb1vgu6FcP75ncUgdcdt4ciUaeaSLzxM4D").unwrap();
     let game_program_id = Pubkey::from_str("5gSZAw9aDQYGJABr6guQqPRFzyX656BSoiEdhHaUzyh6").unwrap();
+    let vrf_verify_program_id = Pubkey::from_str("4qqRVYJAeBynm2yTydBkTJ9wVay3CrUfZ7gf9chtWS5Y").unwrap();
     
 
     // Load keypair from file
@@ -300,17 +302,14 @@ async fn test_vrf_flow_devnet() -> Result<()> {
     let pre_request_payer_balance = rpc_client.get_balance(&payer.pubkey())?;
     let pre_request_game_owner_balance = rpc_client.get_balance(&game_owner.pubkey())?;
     
-    // Read subscription account to get current nonce
+    // Derive request account PDA using subscription nonce
     let subscription_data = rpc_client.get_account_data(&subscription_account.pubkey())?;
-    let subscription = Subscription::try_from_slice(&subscription_data[8..])?;
-    let next_nonce = subscription.nonce.checked_add(1).unwrap();
-
-    // Derive request account PDA
+    let subscription = Subscription::try_from_slice(&subscription_data[8..])?;  // Skip discriminator
     let (request_account, _request_bump) = Pubkey::find_program_address(
         &[
             b"request",
             subscription_account.pubkey().as_ref(),
-            &next_nonce.to_le_bytes(),
+            subscription.nonce.to_le_bytes().as_ref(),
         ],
         &vrf_program_id
     );
@@ -368,13 +367,52 @@ async fn test_vrf_flow_devnet() -> Result<()> {
     // Generate VRF proof
     let vrf_keypair = ECVRFKeyPair::generate(&mut thread_rng());
     let seed = [0u8; 32];  // Example seed
-    let (_output, proof) = vrf_keypair.output(&seed);
+    let (output, proof) = vrf_keypair.output(&seed);
     let proof_bytes = proof.to_bytes();
     let public_key_bytes = vrf_keypair.pk.as_ref().to_vec();
 
-    // Create VRF result PDA
+    // Get proof bytes and reformat to match the on-chain program's expected format (gamma || c || s)
+    let formatted_proof = proof_bytes.clone();
+
+    // Print debug information
+    println!("Proof components:");
+    println!("  Gamma: {:?}", hex::encode(&proof_bytes[0..32]));
+    println!("  Challenge: {:?}", hex::encode(&proof_bytes[32..48]));  // 16 bytes for challenge
+    println!("  Scalar: {:?}", hex::encode(&proof_bytes[48..80]));
+    println!("Complete proof: {:?}", hex::encode(&formatted_proof));
+    println!("Public key: {:?}", hex::encode(&public_key_bytes));
+    println!("Alpha string (seed): {:?}", hex::encode(&seed));
+    println!("VRF Output: {:?}", hex::encode(&output));
+
+    // Verify the VRF proof first
+    let verify_input = VerifyVrfInput {
+        alpha_string: seed.to_vec(),
+        proof_bytes: formatted_proof,
+        public_key_bytes: public_key_bytes.clone(),
+    };
+
+    let verify_ix = Instruction::new_with_borsh(
+        vrf_verify_program_id,  // Use the verification program ID instead of VRF coordinator
+        &verify_input,
+        vec![AccountMeta::new(payer.pubkey(), true)],
+    );
+
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
+    let mut transaction = Transaction::new_with_payer(
+        &[verify_ix],
+        Some(&payer.pubkey()),
+    );
+    transaction.sign(&[&payer], recent_blockhash);
+    
+    println!("Verifying VRF proof...");
+    let signature = rpc_client
+        .send_and_confirm_transaction_with_spinner(&transaction)
+        .expect("Failed to verify VRF proof");
+    println!("VRF proof verified! Signature: {}", signature);
+
+    // Create VRF result PDA using game owner (requester) key
     let (vrf_result, _bump) = Pubkey::find_program_address(
-        &[b"vrf_result", request_account.as_ref()],
+        &[b"vrf_result", game_owner.pubkey().as_ref()],
         &vrf_program_id
     );
 
@@ -467,24 +505,20 @@ async fn test_vrf_flow_devnet() -> Result<()> {
     println!("\n=== Testing Subsequent VRF Request Cost ===");
     let pre_second_request_balance = rpc_client.get_balance(&payer.pubkey())?;
     
-    // Read updated subscription nonce
+    // Create second VRF request using updated subscription nonce
     let subscription_data = rpc_client.get_account_data(&subscription_account.pubkey())?;
-    let subscription = Subscription::try_from_slice(&subscription_data[8..])?;
-    let next_nonce = subscription.nonce.checked_add(1).unwrap();
-
-    // Derive new request account PDA
-    let (new_request_account, _) = Pubkey::find_program_address(
+    let subscription = Subscription::try_from_slice(&subscription_data[8..])?;  // Skip discriminator
+    let (request_account, _request_bump) = Pubkey::find_program_address(
         &[
             b"request",
             subscription_account.pubkey().as_ref(),
-            &next_nonce.to_le_bytes(),
+            subscription.nonce.to_le_bytes().as_ref(),
         ],
         &vrf_program_id
     );
 
-    // Create second VRF request
     let request_ix = VrfCoordinatorInstruction::RequestRandomness {
-        seed: [1u8; 32],  // Different seed
+        seed: [0u8; 32],  // Use the same seed as the first request
         callback_data: borsh::to_vec(&GameInstruction::ConsumeRandomness)?,
         num_words: 1,
         minimum_confirmations: 1,
@@ -495,7 +529,7 @@ async fn test_vrf_flow_devnet() -> Result<()> {
         program_id: vrf_program_id,
         accounts: vec![
             AccountMeta::new(game_owner.pubkey(), true),
-            AccountMeta::new(new_request_account, false),
+            AccountMeta::new(request_account, false),  // Reuse the same request account
             AccountMeta::new(subscription_account.pubkey(), false),
             AccountMeta::new_readonly(system_program::id(), false),
         ],
